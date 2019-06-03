@@ -1,4 +1,3 @@
-//FULLRED = BAD
 #include <sourcemod>
 #include <sdktools>
 #include <morecolors>
@@ -7,11 +6,9 @@
 #pragma newdecls required
 
 //Server/Plugin related globals
-
-#define DatabaseName = "RPDM";
-#define PlayerTableName = "Players";
-#define ServerTableName = "Server";
-
+char DatabaseName[] = "RPDM";
+char PlayerTableName[] = "Players";
+char ServerTableName[] = "Server";
 char PLUGIN_VERSION[5] = "1.0.0";
 char AdvertArr[] = {"Type {green}!cmds{default} or {green}/cmds{default}", "Test", "text2" };
 char CmdArr[2][20] = { "sm_uptime", "sm_cmds" };
@@ -62,6 +59,9 @@ public void OnPluginStart() {
 	//Add listener for chat to override
 	AddCommandListener(OnPlayerChatEvent, "say");
 
+	//Load the database
+	SQL_Initialise();
+
 	//Timers
 	UptimeTimer = CreateTimer(1.0, Timer_CalculateUptime, _, TIMER_REPEAT);
 	AdvertTimer = CreateTimer(600.0, Timer_ProcessAdvert, _, TIMER_REPEAT); //10 minutes
@@ -86,19 +86,14 @@ public void OnClientPostAdminCheck(int client) {
 	char authID[255];
 	GetClientAuthId(client, AuthId_Steam3, authID, sizeof(authID));
 
+	//Load player
+	SQL_Load(client);
+
 	//Setup client
 	PlySteamAuth[client] = authID;
-	PlyWallet[client] = 0;
-	PlyBank[client] = 100;
-	PlySalary[client] = 1;
-	PlyDebt[client] = 0;
-	PlyKills[client] = 0;
-	PlyLevel[client] = 1;
-	PlyXP[client] = 0.00;
-	PlySalaryCount[client] = 60;
 	PlySalaryTimer[client] = CreateTimer(1.0, Timer_CalculateSalary, client, TIMER_REPEAT);
 	PlyHudTimer[client] = CreateTimer(1.0, Timer_ProcessHud, client, TIMER_REPEAT);
-
+	
 	CurrentPlayerCount++;
 }
 
@@ -107,21 +102,15 @@ public void OnClientDisconnect(int client) {
 	GetClientName(client, playerName, sizeof(playerName));
 	PrintToAllClients("{fullred}%s{default} has left the game.", playerName);
 	
+	//Save
+	SQL_Save(client);
 
 	//Destroy timers
 	KillTimer(PlySalaryTimer[client], true);
 	KillTimer(PlyHudTimer[client], true);
 
 	//Clear globals
-	PlySteamAuth[client] = "";
-	PlyWallet[client] = 0;
-	PlyBank[client] = 0;
-	PlySalary[client] = 0;
-	PlyDebt[client] = 0;
-	PlyKills[client] = 0;
-	PlyLevel[client] = 0;
-	PlyXP[client] = 0.0;
-	PlySalaryCount[client] = 0;
+	InitialiseGlobals(client);
 
 	CurrentPlayerCount--;
 }
@@ -186,6 +175,7 @@ public Action OnPlayerChatEvent(int client, const char[] command, int argc) {
 	}
 
 	//(Admin) SirTiggs: hello
+	//(Player) SirTiggs: hello
 	ChatToAll("(%s) {green}%s{default}: {ghostwhite}%s{default}", prefix, playerName, buffer);
 	return Plugin_Handled;
 }
@@ -290,45 +280,80 @@ public Action Command_GetCommands(int client, int args) {
 
 
 //DATABASE
-//Creates database
-static Action SQL_CreateDatabase() {
-	char query[200];
-	char subQuery[400]; //TODO: Work on reducing the hardcoded size
-
-	//Chuck them into seperate formats just so it looks nice 
-	Format(subQuery, sizeof(subQuery), "
-		'ID' VARCHAR(32), 
-		Wallet INT(9) NOT NULL DEFAULT 0,
-		Bank INT(9) NOT NULL DEFAULT 0,
-		Salary INT(9) NOT NULL DEFAULT 0,
-		Debt INT(9) NOT NULL DEFAULT 0,
-		Kills INT(9) NOT NULL DEFAULT 0,
-		Level INT(9) NOT NULL DEFAULT 0,
-		XP DECIMAL(10,5) NOT NULL DEFAULT 0.0");
-	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' (%s)", Tablename, subQuery);
-	SQL_TQuery(RPDMDatabase, SQL_QueryCallback, query);
-
-	return Plugin_Handled;
-}
-
-//Generic callback function
-static void SQL_QueryCallback(Handle owner, Handle hndl, const char[] error, any data) {
-	if(hndl == null) LogError("RPDM - Found handle to be null: %s", error);
-	if(sizeof(error) > 0) LogError("RPDM - Found error on SQL_QueryCallback: %s", error);
-}
-
 //Inserts a new entry into the database
 static void SQL_InsertNew(int client) {
 	if(client != 0) {
-		char query[250], playerAuth[32];
+		char query[250], playerAuth[32] = "";
 		GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));
-
-		Format(query, sizeof(query), "INSERT INTO %s ('ID') VALUES ('%s')", Tablename, playerAuth);
-		SQL_TQuery(RPDMDatabase, SQL_QueryCallback, query);
+		Format(query, sizeof(query), "INSERT INTO %s ('ID') VALUES ('%s')", PlayerTableName, playerAuth);
+		SQL_TQuery(RPDMDatabase, SQL_InsertCallback, query, client);
+		PrintToServer("RPDM - Inserted new player");
 	}
 }
 
-static void SQL_LoadPlayer(Handle owner, Handle hndl, const char[] error, any data) {
+//Load player call
+static void SQL_Load(int client) {
+	char query[200];
+	int index = GetClientOfUserId(client);
+	Format(query, sizeof(query), "SELECT * FROM `%s` WHERE `ID` = '%s'", PlayerTableName, PlySteamAuth[index]);
+	SQL_TQuery(RPDMDatabase, SQL_LoadCallback, query, index);
+	LogMessage("RPDM - Profile %s loaded.", PlySteamAuth[index]);
+}
+
+static void SQL_Save(int client) {
+	char query[200];
+	Format(query, sizeof(query), "UPDATE %s SET Wallet = '%i', Bank = '%i', Salary = '%i', Debt = '%i', Kills = '%i', Level = '%i', XP = '%d' WHERE ID = '%s'", 
+		PlyWallet[client], 
+		PlyBank[client], 
+		PlySalary[client], 
+		PlyDebt[client], 
+		PlyKills[client],
+		PlyLevel[client],
+		PlyXP[client],
+		PlySteamAuth[client]);
+	SQL_TQuery(RPDMDatabase, SQL_SaveCallback, query);
+}
+
+//Inital database call
+static void SQL_Initialise() {
+	char error[200];
+	RPDMDatabase = SQLite_UseDatabase(DatabaseName, error, sizeof(error));
+	if(RPDMDatabase == null) {
+		LogError("RPDM - Error at SQL_Initialise: %s", error);
+	}
+	else {
+		SQL_CreateDatabase();
+	}
+}
+
+//Creates database
+static Action SQL_CreateDatabase() {
+	char query[600];
+	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('ID' VARCHAR(32), Wallet INT(9) NOT NULL DEFAULT 0,Bank INT(9) NOT NULL DEFAULT 100,Salary INT(9) NOT NULL DEFAULT 1,Debt INT(9) NOT NULL DEFAULT 0,Kills INT(9) NOT NULL DEFAULT 0,Level INT(9) NOT NULL DEFAULT 1,XP DECIMAL(10,5) NOT NULL DEFAULT 0.0)", PlayerTableName);
+	SQL_TQuery(RPDMDatabase, SQL_CreateCallback, query);
+	PrintToServer("RPDM - Loaded database");
+	return Plugin_Handled;
+}
+
+//Insert callback function
+static void SQL_InsertCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(hndl == null) {
+		LogError("RPDM - Error at SQL_InsertCallback: %s", error);
+	}
+}
+
+//Save callback function
+static void SQL_SaveCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(hndl == null) LogError("RPDM - Error at SQL_SaveCallback: %s", error);
+}
+
+//Create callback function
+static void SQL_CreateCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(hndl == null) LogError("RPDM - Error at SQL_CreateCallback: %s", error);
+}
+
+//Load callback function
+static void SQL_LoadCallback(Handle owner, Handle hndl, const char[] error, any data) {
 	int client = GetClientOfUserId(data);
 	if(client == 0) return;
 	if(hndl == null) {
@@ -336,14 +361,19 @@ static void SQL_LoadPlayer(Handle owner, Handle hndl, const char[] error, any da
 		return;
 	}
 	else {
-		SQL_FetchString(hdnl, 0, PlySteamAuth[client], sizeof(PlySteamAuth[client]));
-		PlyWallet[client] = SQL_FetchInt(hndl, 1);
-		PlyBank[client] = SQL_FetchInt(hndl, 2);
-		PlySalary[client] = SQL_FetchInt(hndl, 3);
-		PlyDebt[client] = SQL_FetchInt(hndl, 4);
-		PlyKills[client] = SQL_FetchInt(hndl, 5);
-		PlyLevel[client] = SQL_FetchInt(hndl, 6);
-		PlyXP[client] = SQL_FetchFloat(hndl, 7);
+		if(!SQL_GetRowCount(hndl)){
+			SQL_InsertNew(client);
+		}
+		else {
+			PlyWallet[client] = SQL_FetchInt(hndl, 1);
+			PlyBank[client] = SQL_FetchInt(hndl, 2);
+			PlySalary[client] = SQL_FetchInt(hndl, 3);
+			PlyDebt[client] = SQL_FetchInt(hndl, 4);
+			PlyKills[client] = SQL_FetchInt(hndl, 5);
+			PlyLevel[client] = SQL_FetchInt(hndl, 6);
+			PlyXP[client] = SQL_FetchFloat(hndl, 7);
+			PrintToServer("Loaded %s's profile", PlySteamAuth[client]);
+		}
 	}
 }
 
@@ -391,4 +421,18 @@ public int GetKillAmount(int client) {
 
 public float GetXpAmount(int client) {
 	return (PlyLevel[client] * 2.0);
+}
+
+public void InitialiseGlobals(int client) {
+	PlySteamAuth[client] = "";
+	PlyWallet[client] = 0;
+	PlyBank[client] = 0;
+	PlySalary[client] = 0;
+	PlyDebt[client] = 0;
+	PlyKills[client] = 0;
+	PlyLevel[client] = 0;
+	PlyXP[client] = 0.00;
+	PlySalaryCount[client] = 0;
+	PlySalaryTimer[client] = null;
+	PlyHudTimer[client] = null;
 }
