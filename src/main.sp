@@ -55,6 +55,7 @@ public void OnPluginStart() {
 	//Register forwards
 	HookEvent("player_connect", OnPlayerConnectEvent, EventHookMode_Pre);
 	HookEvent("player_death", OnPlayerDeathEvent, EventHookMode_Pre);
+	HookEvent("player_use", OnPlayerUseEvent, EventHookMode_Pre);
 	
 	//Add listener for chat to override
 	AddCommandListener(OnPlayerChatEvent, "say");
@@ -75,9 +76,6 @@ public void OnPluginEnd() {
 }
 
 public void OnMapStart() {
-	//TODO: Grim, hardcoded paths... yuk
-	PrecacheModel("models/barney.mdl", true);
-	PrecacheModel("models/props_c17/FurnitureArmchair001a.mdl", true);
 	PrecacheSound("Friends/friend_join.wav", true);
 }
 
@@ -85,15 +83,11 @@ public void OnMapStart() {
 public void OnClientPostAdminCheck(int client) {
 	char authID[255];
 	GetClientAuthId(client, AuthId_Steam3, authID, sizeof(authID));
+	PlySteamAuth[client] = authID;
 
 	//Load player
 	SQL_Load(client);
 
-	//Setup client
-	PlySteamAuth[client] = authID;
-	PlySalaryTimer[client] = CreateTimer(1.0, Timer_CalculateSalary, client, TIMER_REPEAT);
-	PlyHudTimer[client] = CreateTimer(1.0, Timer_ProcessHud, client, TIMER_REPEAT);
-	
 	CurrentPlayerCount++;
 }
 
@@ -177,6 +171,20 @@ public Action OnPlayerChatEvent(int client, const char[] command, int argc) {
 	//(Admin) SirTiggs: hello
 	//(Player) SirTiggs: hello
 	ChatToAll("(%s) {green}%s{default}: {ghostwhite}%s{default}", prefix, playerName, buffer);
+	return Plugin_Handled;
+}
+
+//Called when a player uses the E key on an entity
+public Action OnPlayerUseEvent(Event event, const char[] name, bool dontBroadcast) {
+	char entClassname[64];
+	int userID = event.GetInt("userid", 0);
+	int entity = event.GetInt("entity", 0);
+
+	if(entity == 0) return Plugin_Handled;
+
+	if(IsValidEntity(entity)) {
+		GetEntityClassname(entity, entClassname, sizeof(entClassname));
+	}
 	return Plugin_Handled;
 }
 
@@ -372,6 +380,9 @@ static void SQL_LoadCallback(Handle owner, Handle hndl, const char[] error, any 
 			PlyKills[client] = SQL_FetchInt(hndl, 5);
 			PlyLevel[client] = SQL_FetchInt(hndl, 6);
 			PlyXP[client] = SQL_FetchFloat(hndl, 7);
+			PlySalaryTimer[client] = CreateTimer(1.0, Timer_CalculateSalary, client, TIMER_REPEAT);
+			PlyHudTimer[client] = CreateTimer(1.0, Timer_ProcessHud, client, TIMER_REPEAT);
+
 			PrintToServer("Loaded %s's profile", PlySteamAuth[client]);
 		}
 	}
