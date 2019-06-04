@@ -50,15 +50,18 @@ public void OnPluginStart() {
 	//Register commands
 	RegConsoleCmd("sm_uptime", Command_GetUptime, "Returns the uptime of the server.");
 	RegConsoleCmd("sm_cmds", Command_GetCommands, "Returns a list of commands.");
+
 	RegAdminCmd("sm_reload", Command_ReloadServer, ADMFLAG_ROOT, "Reloads server on current map.");
+	RegAdminCmd("sm_setwallet", Command_SetPlayerWallet, ADMFLAG_ROOT, "Sets the players wallet.");
 
 	//Register forwards
-	HookEvent("player_connect", OnPlayerConnectEvent, EventHookMode_Pre);
-	HookEvent("player_death", OnPlayerDeathEvent, EventHookMode_Pre);
-	HookEvent("player_use", OnPlayerUseEvent, EventHookMode_Pre);
+	HookEvent("player_connect", Event_PlayerConnecting, EventHookMode_Pre);
+	HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Pre);
+	HookEvent("player_death", Event_PlayerDeath, EventHookMode_Pre);
+	HookEvent("player_score", Event_PlayerScore, EventHookMode_Pre);
 	
 	//Add listener for chat to override
-	AddCommandListener(OnPlayerChatEvent, "say");
+	AddCommandListener(Event_PlayerChat, "say");
 
 	//Load the database
 	SQL_Initialise();
@@ -71,8 +74,8 @@ public void OnPluginStart() {
 }
 
 public void OnPluginEnd() {
-	KillTimer(UptimeTimer, true);
-	KillTimer(AdvertTimer, true);
+	KillTimer(UptimeTimer);
+	KillTimer(AdvertTimer);
 }
 
 public void OnMapStart() {
@@ -91,35 +94,41 @@ public void OnClientPostAdminCheck(int client) {
 	CurrentPlayerCount++;
 }
 
-public void OnClientDisconnect(int client) {	
-	char playerName[32];
-	GetClientName(client, playerName, sizeof(playerName));
-	PrintToAllClients("{fullred}%s{default} has left the game.", playerName);
-	
-	//Save
-	SQL_Save(client);
+//Called on movement controls 
+public Action OnPlayerRunCmd(int client, int& buttons, int& impulse, float vel[3], float angles[3], int& weapon, int& subtype, int& cmdnum, int& tickcount, int& seed, int mouse[2]) {
+	//E button
+	if(buttons == IN_USE) {
+		int ent = GetClientAimTarget(client, false);
+		if(IsValidEntity(ent)) {
+			char className[32];
+			bool result = GetEntityClassname(ent, className, sizeof(className));
 
-	//Destroy timers
-	KillTimer(PlySalaryTimer[client], true);
-	KillTimer(PlyHudTimer[client], true);
+			if(result) {
+				PrintToClientEx(client, "EntClassname: %s", className);
 
-	//Clear globals
-	InitialiseGlobals(client);
-
-	CurrentPlayerCount--;
+				if(StrEqual(className, "func_door_rotating", false) || StrEqual(className, "func_door", false)) {
+					AcceptEntityInput(ent, "Open");
+					PrintToClientEx(client, "Trying to open door");
+				}
+			}		
+		}
+	}
 }
 
-public Action OnPlayerConnectEvent(Event event, const char[] name, bool dontBroadcast) {
+
+
+//==EVENTS
+public Action Event_PlayerConnecting(Event event, const char[] name, bool dontBroadcast) {
 	char playerName[32], address[32];
 
 	event.GetString("address", address, sizeof(address));
 	event.GetString("name", playerName, sizeof(playerName));
 
-	PrintToAllClients("{green}%s(%s){default} has joined the game.", playerName, address);
+	PrintToAllClients("{green}%s(%s){default} is joining the game.", playerName, address);
 	return Plugin_Handled;
 }
 
-public Action OnPlayerDeathEvent(Event event, const char[] name, bool dontBroadcast) {
+public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
 	int userID = 0, attacker = 0, amount = 0;
 	char victimName[32], attackerName[32];
 
@@ -146,7 +155,37 @@ public Action OnPlayerDeathEvent(Event event, const char[] name, bool dontBroadc
 	return Plugin_Handled;
 }
 
-public Action OnPlayerChatEvent(int client, const char[] command, int argc) {
+public Action Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast) {
+	char plyName[32];
+	event.GetString("name", plyName, sizeof(plyName), "unknown");
+	int exClient = GetClientOfUserId(event.GetInt("userid", 0));
+	if(exClient != 0 && CurrentPlayerCount != 0) {
+		PrintToAllClients("{fullred}%s{default} has left the game.", name);
+		
+		//Save
+		SQL_Save(exClient);
+
+		//Kill timers
+		if(PlySalaryTimer[exClient] != null) {
+			KillTimer(PlySalaryTimer[exClient]);
+			PlySalaryTimer[exClient] = null;
+		}
+
+		if(PlyHudTimer[exClient] != null) {
+			KillTimer(PlyHudTimer[exClient]);
+			PlyHudTimer[exClient] = null;
+		}
+
+		//Clear globals
+		InitialiseGlobals(exClient);
+		CurrentPlayerCount--;
+	}
+}
+
+
+
+
+public Action Event_PlayerChat(int client, const char[] command, int argc) {
 	char buffer[256], prefix[32], playerName[32], authID[32];
 
 	GetCmdArg(1, buffer, sizeof(buffer));
@@ -174,17 +213,11 @@ public Action OnPlayerChatEvent(int client, const char[] command, int argc) {
 	return Plugin_Handled;
 }
 
-//Called when a player uses the E key on an entity
-public Action OnPlayerUseEvent(Event event, const char[] name, bool dontBroadcast) {
-	char entClassname[64];
-	int userID = event.GetInt("userid", 0);
-	int entity = event.GetInt("entity", 0);
-
-	if(entity == 0) return Plugin_Handled;
-
-	if(IsValidEntity(entity)) {
-		GetEntityClassname(entity, entClassname, sizeof(entClassname));
-	}
+public Action Event_PlayerScore(Event event, const char[] name, bool dontBroadcast) {
+	int userid = event.GetInt("userid", 0);
+	int kills = event.GetInt("kills", 0);
+	int deaths = event.GetInt("deaths", 0);
+	int score = event.GetInt("score", 0);
 	return Plugin_Handled;
 }
 
@@ -282,6 +315,26 @@ public Action Command_GetCommands(int client, int args) {
 	return Plugin_Handled;
 }
 
+public Action Command_SetPlayerWallet(int client, int args) {
+	char arg1[32], arg2[9], targetName[32];
+	GetCmdArg(1, arg1, sizeof(arg1));
+	GetCmdArg(2, arg2, sizeof(arg2));
+
+	int amount = StringToInt(arg2);
+	if(amount == 0) { PrintToClientEx(client, "Failed to convert 2nd arguement to int."); return Plugin_Handled; }
+
+	int target = FindTarget(client, arg1, true, false);
+	if(target == -1) { PrintToClientEx(client, "Failed to find target."); return Plugin_Handled; }
+
+	GetClientName(target, targetName, sizeof(targetName));
+
+	PlyWallet[target] = amount;
+	PrintToClientEx(target, "Your wallet has been set to {green}$%i{default}", amount);
+	PrintToClientEx(client, "You've set %s's wallet to {green}$%i{default}", targetName, amount);
+	SQL_Save(target);
+	return Plugin_Handled;
+}
+
 
 
 
@@ -290,35 +343,28 @@ public Action Command_GetCommands(int client, int args) {
 //DATABASE
 //Inserts a new entry into the database
 static void SQL_InsertNew(int client) {
-	if(client != 0) {
-		char query[250], playerAuth[32] = "";
-		GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));
-		Format(query, sizeof(query), "INSERT INTO %s ('ID') VALUES ('%s')", PlayerTableName, playerAuth);
-		SQL_TQuery(RPDMDatabase, SQL_InsertCallback, query, client);
-		PrintToServer("RPDM - Inserted new player");
-	}
+	char query[250], playerAuth[32] = "";
+	GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));
+	Format(query, sizeof(query), "INSERT INTO %s ('ID') VALUES ('%s')", PlayerTableName, playerAuth);
+	SQL_TQuery(RPDMDatabase, SQL_InsertCallback, query, client);
+	SQL_Load(client);
+	PrintToServer("[RPDM] Inserted & loaded new player: %s", playerAuth);
 }
 
 //Load player call
 static void SQL_Load(int client) {
 	char query[200];
-	int index = GetClientOfUserId(client);
-	Format(query, sizeof(query), "SELECT * FROM `%s` WHERE `ID` = '%s'", PlayerTableName, PlySteamAuth[index]);
-	SQL_TQuery(RPDMDatabase, SQL_LoadCallback, query, index);
-	LogMessage("RPDM - Profile %s loaded.", PlySteamAuth[index]);
+	//INIT
+	Format(query, sizeof(query), "SELECT * FROM `%s` WHERE `ID` = '%s'", PlayerTableName, PlySteamAuth[client]);
+	SQL_TQuery(RPDMDatabase, SQL_LoadCallback, query, client);
+	LogMessage("[RPDM] Successfully loaded profile: %s", PlySteamAuth[client]);
 }
 
-static void SQL_Save(int client) {
+static void SQL_Save(int clientIndex) {
 	char query[200];
-	Format(query, sizeof(query), "UPDATE %s SET Wallet = '%i', Bank = '%i', Salary = '%i', Debt = '%i', Kills = '%i', Level = '%i', XP = '%d' WHERE ID = '%s'", 
-		PlyWallet[client], 
-		PlyBank[client], 
-		PlySalary[client], 
-		PlyDebt[client], 
-		PlyKills[client],
-		PlyLevel[client],
-		PlyXP[client],
-		PlySteamAuth[client]);
+	int client = GetClientUserId(clientIndex);
+
+	Format(query, sizeof(query), "UPDATE %s SET Wallet = '%i', Bank = '%i', Salary = '%i', Debt = '%i', Kills = '%i', Level = '%i', XP = '%d' WHERE ID = '%s'", PlayerTableName, PlyWallet[client], PlyBank[client], PlySalary[client], PlyDebt[client], PlyKills[client], PlyLevel[client], PlyXP[client], PlySteamAuth[client]);
 	SQL_TQuery(RPDMDatabase, SQL_SaveCallback, query);
 }
 
@@ -327,65 +373,72 @@ static void SQL_Initialise() {
 	char error[200];
 	RPDMDatabase = SQLite_UseDatabase(DatabaseName, error, sizeof(error));
 	if(RPDMDatabase == null) {
-		LogError("RPDM - Error at SQL_Initialise: %s", error);
+		PrintToServer("[RPDM] Error at SQL_Initialise: %s", error);
+		LogError("[RPDM] Error at SQL_Initialise: %s", error);
 	}
 	else {
 		SQL_CreateDatabase();
 	}
 }
 
-//Creates database
+//Creates or loads database
 static Action SQL_CreateDatabase() {
 	char query[600];
-	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('ID' VARCHAR(32), Wallet INT(9) NOT NULL DEFAULT 0,Bank INT(9) NOT NULL DEFAULT 100,Salary INT(9) NOT NULL DEFAULT 1,Debt INT(9) NOT NULL DEFAULT 0,Kills INT(9) NOT NULL DEFAULT 0,Level INT(9) NOT NULL DEFAULT 1,XP DECIMAL(10,5) NOT NULL DEFAULT 0.0)", PlayerTableName);
+	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('ID' VARCHAR(32), Wallet INT(9) NOT NULL DEFAULT 0,Bank INT(9) NOT NULL DEFAULT 100,Salary INT(9) NOT NULL DEFAULT 1,Debt INT(9) NOT NULL DEFAULT 0,Kills INT(9) NOT NULL DEFAULT 0,Level INT(9) NOT NULL DEFAULT 1,XP DECIMAL(10,5) NOT NULL DEFAULT 0)", PlayerTableName);
 	SQL_TQuery(RPDMDatabase, SQL_CreateCallback, query);
-	PrintToServer("RPDM - Loaded database");
+	PrintToServer("[RPDM] Loaded database");
 	return Plugin_Handled;
+}
+
+//Load callback function
+static void SQL_LoadCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(data == 0) return;
+	if(hndl == null) {
+		PrintToServer("[RPDM] Found error on LoadPlayer: %s", error);
+		LogError("[RPDM] Found error on LoadPlayer: %s", error);
+		return;
+	}
+	else {
+		if(!SQL_GetRowCount(hndl)){
+			SQL_InsertNew(data);
+		}
+		else {
+			PlyWallet[data] = SQL_FetchInt(hndl, 1);
+			PlyBank[data] = SQL_FetchInt(hndl, 2);
+			PlySalary[data] = SQL_FetchInt(hndl, 3);
+			PlyDebt[data] = SQL_FetchInt(hndl, 4);
+			PlyKills[data] = SQL_FetchInt(hndl, 5);
+			PlyLevel[data] = SQL_FetchInt(hndl, 6);
+			PlyXP[data] = SQL_FetchFloat(hndl, 7);
+			PlySalaryTimer[data] = CreateTimer(1.0, Timer_CalculateSalary, data, TIMER_REPEAT);
+			PlyHudTimer[data] = CreateTimer(1.0, Timer_ProcessHud, data, TIMER_REPEAT);
+			PrintToServer("[RPDM] Profile loaded successfully: %s", PlySteamAuth[data]);
+		}
+	}
 }
 
 //Insert callback function
 static void SQL_InsertCallback(Handle owner, Handle hndl, const char[] error, any data) {
 	if(hndl == null) {
-		LogError("RPDM - Error at SQL_InsertCallback: %s", error);
+		PrintToServer("[RPDM] Error at SQL_InsertCallback: %s", error);
+		LogError("[RPDM] Error at SQL_InsertCallback: %s", error);
 	}
 }
 
 //Save callback function
 static void SQL_SaveCallback(Handle owner, Handle hndl, const char[] error, any data) {
-	if(hndl == null) LogError("RPDM - Error at SQL_SaveCallback: %s", error);
+	if(hndl == null) {
+		PrintToServer("[RPDM] Error at SQL_SaveCallback: %s", error);
+		LogError("[RPDM] Error at SQL_SaveCallback: %s", error);
+	} 
 }
 
 //Create callback function
 static void SQL_CreateCallback(Handle owner, Handle hndl, const char[] error, any data) {
-	if(hndl == null) LogError("RPDM - Error at SQL_CreateCallback: %s", error);
-}
-
-//Load callback function
-static void SQL_LoadCallback(Handle owner, Handle hndl, const char[] error, any data) {
-	int client = GetClientOfUserId(data);
-	if(client == 0) return;
 	if(hndl == null) {
-		LogError("RPDM - Found error on LoadPlayer: %s", error);
-		return;
-	}
-	else {
-		if(!SQL_GetRowCount(hndl)){
-			SQL_InsertNew(client);
-		}
-		else {
-			PlyWallet[client] = SQL_FetchInt(hndl, 1);
-			PlyBank[client] = SQL_FetchInt(hndl, 2);
-			PlySalary[client] = SQL_FetchInt(hndl, 3);
-			PlyDebt[client] = SQL_FetchInt(hndl, 4);
-			PlyKills[client] = SQL_FetchInt(hndl, 5);
-			PlyLevel[client] = SQL_FetchInt(hndl, 6);
-			PlyXP[client] = SQL_FetchFloat(hndl, 7);
-			PlySalaryTimer[client] = CreateTimer(1.0, Timer_CalculateSalary, client, TIMER_REPEAT);
-			PlyHudTimer[client] = CreateTimer(1.0, Timer_ProcessHud, client, TIMER_REPEAT);
-
-			PrintToServer("Loaded %s's profile", PlySteamAuth[client]);
-		}
-	}
+		PrintToServer("[RPDM] Error at SQL_CreateCallback: %s", error);
+		LogError("[RPDM] Error at SQL_CreateCallback: %s", error);
+	} 
 }
 
 
