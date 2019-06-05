@@ -8,7 +8,6 @@
 //Server/Plugin related globals
 char DatabaseName[] = "RPDM";
 char PlayerTableName[] = "Players";
-char ServerTableName[] = "Server";
 char PLUGIN_VERSION[5] = "1.0.0";
 char AdvertArr[] = {"Type {green}!cmds{default} or {green}/cmds{default}", "Test", "text2" };
 char CmdArr[2][20] = { "sm_uptime", "sm_cmds" };
@@ -34,6 +33,7 @@ float PlyXP[MAXPLAYERS + 1];
 
 //Player non-database globals
 int PlySalaryCount[MAXPLAYERS + 1];
+bool PlyHasMenuOpen[MAXPLAYERS + 1];
 Handle PlySalaryTimer[MAXPLAYERS + 1];
 Handle PlyHudTimer[MAXPLAYERS + 1];
 
@@ -56,10 +56,12 @@ public void OnPluginStart() {
 	RegAdminCmd("sm_fakeclient", Command_CreateFakeClient, ADMFLAG_ROOT, "Creates and connects a fake client.");
 
 	//Register forwards
-	HookEvent("player_connect", Event_PlayerConnecting, EventHookMode_Pre);
+	HookEvent("player_connect_client", Event_PlayerConnectClient, EventHookMode_Pre);
+	HookEvent("player_connect", Event_PlayerConnect, EventHookMode_Pre);
 	HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Pre);
 	HookEvent("player_death", Event_PlayerDeath, EventHookMode_Pre);
-	HookEvent("player_score", Event_PlayerScore, EventHookMode_Pre);
+	HookEvent("player_activate", Event_PlayerActivate, EventHookMode_Pre);
+	HookEvent("player_team", Event_PlayerTeam, EventHookMode_Pre);
 	
 	//Add listener for chat to override
 	AddCommandListener(Event_PlayerChat, "say");
@@ -95,113 +97,82 @@ public void OnClientPostAdminCheck(int client) {
 	CurrentPlayerCount++;
 }
 
-//Called on movement controls 
-public Action OnPlayerRunCmd(int client, int& buttons, int& impulse, float vel[3], float angles[3], int& weapon, int& subtype, int& cmdnum, int& tickcount, int& seed, int mouse[2]) {
-	if(buttons == IN_USE) {
-		//Are we looking at a door?
-		Use_ProcessDoorFunc(client);
+public void OnClientDisconnect(int client) {
+	SQL_Save(client);
 
-		//Are we looking at a player?
-		Use_ProcessPlayerFunc(client);
+	if(PlySalaryTimer[client] != null) {
+		KillTimer(PlySalaryTimer[client]);
+		PlySalaryTimer[client] = null;
 	}
-}
 
-public void Use_ProcessDoorFunc(int client) {
-	int entity = GetClientAimTarget(client, false);
-	if(IsValidEntity(entity)) {
-		char entClassname[32];
-		bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
-		if(result) {
-			if(StrEqual(entClassname, "func_door_rotating", false) || StrEqual(entClassname, "func_door", false)) {
-				//Debug
-				if(GetUserAdmin(client) != INVALID_ADMIN_ID) {
-					AcceptEntityInput(entity, "Open");
-				}
-
-				float distance; 
-				distance = GetEntityDistance(client, entity);
-				PrintToClientEx(client, "Distance: %d", distance);
-			}
-		}
+	if(PlyHudTimer[client] != null) {
+		KillTimer(PlyHudTimer[client]);
+		PlyHudTimer[client] = null;
 	}
+
+	PlySteamAuth[client] = "";
+	PlyWallet[client] = 0;
+	PlyBank[client] = 0;
+	PlySalary[client] = 0;
+	PlyDebt[client] = 0;
+	PlyKills[client] = 0;
+	PlyLevel[client] = 0;
+	PlyXP[client] = 0.00;
+	PlySalaryCount[client] = 0;
+	PlySalaryTimer[client] = null;
+	PlyHudTimer[client] = null;
+	CurrentPlayerCount--;
 }
-
-public void Use_ProcessPlayerFunc(int client) {
-	int player = GetClientAimTarget(client, true);
-	if(IsClientConnected(player) && IsClientInGame(player)) {
-		//Open menu to player
-	}
-}
-
-
 
 //==EVENTS
-public Action Event_PlayerConnecting(Event event, const char[] name, bool dontBroadcast) {
-	char playerName[32], address[32];
-
-	event.GetString("address", address, sizeof(address));
+public Action Event_PlayerConnect(Event event, const char[] name, bool dontBroadcast) {
+	char playerName[32], networkID[32];
 	event.GetString("name", playerName, sizeof(playerName));
-
-	PrintToAllClients("{green}%s(%s){default} is joining the game.", playerName, address);
-	return Plugin_Handled;
-}
-
-public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
-	int userID = 0, attacker = 0, amount = 0;
-	char victimName[32], attackerName[32];
-
-	userID = event.GetInt("userid", 0);
-	attacker = event.GetInt("attacker", 0);
-
-	if(IsClientConnected(userID) && IsClientInGame(userID) && userID != 0) {
-		if(!IsClientConnected(attacker)) {
-			PrintToClientEx(userID, "You've been killed by an unknown entity.");
-			return Plugin_Handled;
-		}
-
-		GetClientName(userID, victimName, sizeof(victimName));
-		PrintToClientEx(userID, "You've been killed by: {fullred}%s{default}", attackerName);
-	}
-
-	if(IsClientConnected(attacker) && IsClientInGame(attacker) && attacker != 0) {
-		GetClientName(attacker, attackerName, sizeof(attackerName));
-		amount = GetKillAmount(attacker);
-		PlyKills[attacker]++;
-		PlyWallet[attacker]+= amount;
-		PrintToClientEx(attacker, "You've killed {fullred}%s{default} and earned {green}$%i{default}", attackerName, amount);
-	}
-	return Plugin_Handled;
+	event.GetString("networkid", networkID, sizeof(networkID));
+	PrintToAllClients("{green}%s{default} (%s) has connected.", playerName, networkID);
+	event.BroadcastDisabled = true;
+	dontBroadcast = true;
+	return Plugin_Continue;
 }
 
 public Action Event_PlayerDisconnect(Event event, const char[] name, bool dontBroadcast) {
-	char plyName[32];
-	event.GetString("name", plyName, sizeof(plyName), "unknown");
-	int exClient = GetClientOfUserId(event.GetInt("userid", 0));
-	if(exClient != 0 && CurrentPlayerCount != 0) {
-		PrintToAllClients("{fullred}%s{default} has left the game.", name);
-		
-		//Save
-		SQL_Save(exClient);
+	char playerName[32], reason[32], networkID[32];
+	event.GetString("name", playerName, sizeof(playerName));
+	event.GetString("reason", reason, sizeof(reason));
+	event.GetString("networkID", networkID, sizeof(networkID));
 
-		//Kill timers
-		if(PlySalaryTimer[exClient] != null) {
-			KillTimer(PlySalaryTimer[exClient]);
-			PlySalaryTimer[exClient] = null;
-		}
+	PrintToAllClients("{green}%s{default} (%s) has disconnected. Reason: ({fullred}%s{default})", playerName, networkID, reason);
+	LogMessage("RPDM - Client Disconnect: %s", networkID);
 
-		if(PlyHudTimer[exClient] != null) {
-			KillTimer(PlyHudTimer[exClient]);
-			PlyHudTimer[exClient] = null;
-		}
-
-		//Clear globals
-		InitialiseGlobals(exClient);
-		CurrentPlayerCount--;
-	}
+	event.BroadcastDisabled = true;
+	dontBroadcast = true;
+	return Plugin_Continue;
 }
 
+public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
+	int client = 0, attacker = 0, amount = 0;
+	char victimName[32], attackerName[32];
 
+	client = GetClientOfUserId(event.GetInt("userid", 0));
+	attacker = GetClientOfUserId(event.GetInt("attacker", 0));
 
+	if(IsClientConnected(client) && IsClientInGame(client) && client != 0) {
+		if(!IsClientConnected(attacker)) {
+			PrintToClientEx(client, "You've been killed by an unknown entity.");
+		}
+		GetClientName(client, attackerName, sizeof(attackerName));
+		PrintToClientEx(client, "You've been killed by: {fullred}%s{default}", attackerName);
+	}
+
+	if(IsClientConnected(attacker) && IsClientInGame(attacker) && attacker != 0) {
+		GetClientName(client, victimName, sizeof(victimName));
+		amount = GetKillAmount(attacker);
+		PlyKills[attacker]++;
+		PlyWallet[attacker]+= amount;
+		PrintToClientEx(attacker, "You've killed {fullred}%s{default} and earned {green}$%i{default}", victimName, amount);
+	}
+	return Plugin_Handled;
+}
 
 public Action Event_PlayerChat(int client, const char[] command, int argc) {
 	char buffer[256], prefix[32], playerName[32], authID[32];
@@ -219,7 +190,7 @@ public Action Event_PlayerChat(int client, const char[] command, int argc) {
 	}
 
 	if(IsClientAuthorized(client)) {
-		prefix = "{cyan}Admin{default}";
+		prefix = "{orange}Admin{default}";
 	}
 	else {
 		prefix = "Player";
@@ -231,13 +202,103 @@ public Action Event_PlayerChat(int client, const char[] command, int argc) {
 	return Plugin_Handled;
 }
 
+public Action Event_PlayerConnectClient(Event event, const char[] name, bool dontBroadcast) {
+	event.BroadcastDisabled = true;
+	dontBroadcast = true;
+	return Plugin_Continue;
+}
+
 public Action Event_PlayerScore(Event event, const char[] name, bool dontBroadcast) {
-	int userid = event.GetInt("userid", 0);
-	int kills = event.GetInt("kills", 0);
-	int deaths = event.GetInt("deaths", 0);
-	int score = event.GetInt("score", 0);
+	event.BroadcastDisabled = true;
+	dontBroadcast = true;
 	return Plugin_Handled;
 }
+
+public Action Event_PlayerActivate(Event event, const char[] name, bool dontBroadcast) {
+	event.BroadcastDisabled = true;
+	dontBroadcast = true;
+	return Plugin_Handled;
+}
+
+public Action Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast) {
+	event.BroadcastDisabled = true;
+	return Plugin_Handled;
+}
+
+//Called on movement controls 
+public Action OnPlayerRunCmd(int client, int& buttons, int& impulse, float vel[3], float angles[3], int& weapon, int& subtype, int& cmdnum, int& tickcount, int& seed, int mouse[2]) {
+	if(buttons == IN_USE) {
+		//Are we looking at a door?
+		Use_ProcessDoorFunc(client);
+
+		//Are we looking at a player?
+		Use_ProcessPlayerFunc(client);
+	}
+	return Plugin_Continue;
+}
+
+public void Use_ProcessDoorFunc(int client) {
+	int entity = GetClientAimTarget(client, false);
+	if(entity == -1 || entity == -2) return;
+	if(!IsValidEntity(entity)) return;
+
+	char entClassname[32];
+	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+
+	if(!result) return;
+	if(StrEqual(entClassname, "func_door_rotating", false) || StrEqual(entClassname, "func_door", false)) {
+		int distance = FloatToInt(GetEntityDistance(client, entity));
+		if(distance <= 80) {
+			if(GetUserAdmin(client) != INVALID_ADMIN_ID) {
+				AcceptEntityInput(entity, "Open");
+			}
+		}
+	}
+}
+
+public void Use_ProcessPlayerFunc(int client) {
+	int player = GetClientAimTarget(client, true);
+	if(player == -1 || player == -2) return;
+
+	//TODO: Add check to see if bot
+	if(IsClientConnected(player) && IsClientInGame(player)) {
+		Menu_OpenPlayer(client);
+	}
+}
+
+//==MENUS==
+
+public int Menu_PlayerHandler(Menu menu, MenuAction action, int param1, int param2)
+{
+	/* If an option was selected, tell the client about the item. */
+	if (action == MenuAction_Select)
+	{
+		char info[32];
+		bool found = menu.GetItem(param2, info, sizeof(info));
+		PrintToConsole(param1, "You selected item: %d (found? %d info: %s)", param2, found, info);
+	}
+	/* If the menu was cancelled, print a message to the server about it. */
+	else if (action == MenuAction_Cancel)
+	{
+		PrintToServer("Client %d's menu was cancelled.  Reason: %d", param1, param2);
+	}
+	/* If the menu has ended, destroy it */
+	else if (action == MenuAction_End)
+	{
+		delete menu;
+	}
+}
+ 
+public void Menu_OpenPlayer(int client)
+{
+	Menu menu = new Menu(Menu_PlayerHandler);
+	menu.SetTitle("Do you like apples?");
+	menu.AddItem("yes", "Yes");
+	menu.AddItem("no", "No");
+	menu.ExitButton = false;
+	menu.Display(client, 20);
+}
+
 
 
 
@@ -274,8 +335,15 @@ public Action Timer_ProcessHud(Handle timer, any client) {
 			goodGrammar = "Seconds";
 		}
 
-		Format(hudText, sizeof(hudText), "Wallet: $%i\nBank: $%i\nDebt: $%i\nSalary: $%i\nNext Pay: %i %s\nKills: %i\nLevel: %i\nXP: %d/100", 
-			PlyWallet[client], PlyBank[client], PlyDebt[client], PlySalary[client], PlySalaryCount[client], goodGrammar, PlyKills[client], PlyLevel[client], PlyXP[client]);
+		char reWallet[32], reBank[32], reDebt[32], reSalary[32], reKills[32];
+		FormatNumber(PlyWallet[client], reWallet, sizeof(reWallet));
+		FormatNumber(PlyBank[client], reBank, sizeof(reBank));
+		FormatNumber(PlyDebt[client], reDebt, sizeof(reDebt));
+		FormatNumber(PlySalary[client], reSalary, sizeof(reSalary));
+		FormatNumber(PlyKills[client], reKills, sizeof(reKills));
+
+		Format(hudText, sizeof(hudText), "Wallet: $%s\nBank: $%s\nDebt: $%s\nSalary: $%s\nNext Pay: %i %s\nKills: %s\nLevel: %i\nXP: %d/100", 
+			reWallet, reBank, reDebt, reSalary, PlySalaryCount[client], goodGrammar, reKills, PlyLevel[client], PlyXP[client]);
 		SetHudTextParams(HudPosition[0], HudPosition[1], HudPosition[2], HudColor[0], HudColor[1], HudColor[2], HudColor[3], 0, 0.0, 0.0);
 		ShowHudText(client, -1, hudText);
 	}
@@ -347,8 +415,12 @@ public Action Command_SetPlayerWallet(int client, int args) {
 	GetClientName(target, targetName, sizeof(targetName));
 
 	PlyWallet[target] = amount;
-	PrintToClientEx(target, "Your wallet has been set to {green}$%i{default}", amount);
-	PrintToClientEx(client, "You've set %s's wallet to {green}$%i{default}", targetName, amount);
+
+	char amountVal[32];
+	FormatNumber(amount, amountVal, sizeof(amountVal));
+
+	PrintToClientEx(target, "Your wallet has been set to {green}$%s{default}", amountVal);
+	PrintToClientEx(client, "You've set %s's wallet to {green}$%s{default}", targetName, amountVal);
 	SQL_Save(target);
 	return Plugin_Handled;
 }
@@ -460,12 +532,7 @@ static void SQL_InsertCallback(Handle owner, Handle hndl, const char[] error, an
 
 //Save callback function
 static void SQL_SaveCallback(Handle owner, Handle hndl, const char[] error, any data) {
-	if(hndl != null) {
-		char playerName[32];
-		GetClientName(data, playerName, sizeof(playerName));
-		PrintToServer("[RPDM] Saved client: %s", playerName);
-	}
-	else {
+	if(hndl == null) {
 		PrintToServer("[RPDM] Error at SQL_SaveCallback: %s", error);
 		LogError("[RPDM] Error at SQL_SaveCallback: %s", error);
 	}
@@ -529,6 +596,35 @@ public float GetXpAmount(int client) {
 	return (PlyLevel[client] * 2.0);
 }
 
+public int FloatToInt(float value) {
+	char strVal[10];
+	FloatToString(value, strVal, sizeof(strVal));
+	return StringToInt(strVal);
+}
+
+public void FormatNumber(int Number, char Output[32], int MaxLen) {
+	IntToString(Number, Output, MaxLen);
+	
+	int pos = strlen(Output	);
+	int count = 1;
+	while(pos > 0) {
+		if(count == 4) {
+			count = 0;
+			int len = strlen(Output);
+
+			for(int i = len; i >= pos; i--) {
+				Output[i+1] = Output[i];
+			}
+
+			Output[pos] = ',';
+			Output[len+2] = 0;
+			pos++;
+		}
+		count++;
+		pos--;
+	}
+}
+
 public void StripWeapons(int client) {
 
 }
@@ -539,18 +635,4 @@ public float GetEntityDistance(int client, int entity) {
 	GetEntPropVector(entity, Prop_Send, "m_vecOrigin", entityPos);
 	retVal = GetVectorDistance(playerPos, entityPos, false);
 	return retVal;
-}
-
-public void InitialiseGlobals(int client) {
-	PlySteamAuth[client] = "";
-	PlyWallet[client] = 0;
-	PlyBank[client] = 0;
-	PlySalary[client] = 0;
-	PlyDebt[client] = 0;
-	PlyKills[client] = 0;
-	PlyLevel[client] = 0;
-	PlyXP[client] = 0.00;
-	PlySalaryCount[client] = 0;
-	PlySalaryTimer[client] = null;
-	PlyHudTimer[client] = null;
 }
