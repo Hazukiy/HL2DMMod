@@ -53,6 +53,7 @@ public void OnPluginStart() {
 
 	RegAdminCmd("sm_reload", Command_ReloadServer, ADMFLAG_ROOT, "Reloads server on current map.");
 	RegAdminCmd("sm_setwallet", Command_SetPlayerWallet, ADMFLAG_ROOT, "Sets the players wallet.");
+	RegAdminCmd("sm_fakeclient", Command_CreateFakeClient, ADMFLAG_ROOT, "Creates and connects a fake client.");
 
 	//Register forwards
 	HookEvent("player_connect", Event_PlayerConnecting, EventHookMode_Pre);
@@ -96,22 +97,39 @@ public void OnClientPostAdminCheck(int client) {
 
 //Called on movement controls 
 public Action OnPlayerRunCmd(int client, int& buttons, int& impulse, float vel[3], float angles[3], int& weapon, int& subtype, int& cmdnum, int& tickcount, int& seed, int mouse[2]) {
-	//E button
 	if(buttons == IN_USE) {
-		int ent = GetClientAimTarget(client, false);
-		if(IsValidEntity(ent)) {
-			char className[32];
-			bool result = GetEntityClassname(ent, className, sizeof(className));
+		//Are we looking at a door?
+		Use_ProcessDoorFunc(client);
 
-			if(result) {
-				PrintToClientEx(client, "EntClassname: %s", className);
+		//Are we looking at a player?
+		Use_ProcessPlayerFunc(client);
+	}
+}
 
-				if(StrEqual(className, "func_door_rotating", false) || StrEqual(className, "func_door", false)) {
-					AcceptEntityInput(ent, "Open");
-					PrintToClientEx(client, "Trying to open door");
+public void Use_ProcessDoorFunc(int client) {
+	int entity = GetClientAimTarget(client, false);
+	if(IsValidEntity(entity)) {
+		char entClassname[32];
+		bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+		if(result) {
+			if(StrEqual(entClassname, "func_door_rotating", false) || StrEqual(entClassname, "func_door", false)) {
+				//Debug
+				if(GetUserAdmin(client) != INVALID_ADMIN_ID) {
+					AcceptEntityInput(entity, "Open");
 				}
-			}		
+
+				float distance; 
+				distance = GetEntityDistance(client, entity);
+				PrintToClientEx(client, "Distance: %d", distance);
+			}
 		}
+	}
+}
+
+public void Use_ProcessPlayerFunc(int client) {
+	int player = GetClientAimTarget(client, true);
+	if(IsClientConnected(player) && IsClientInGame(player)) {
+		//Open menu to player
 	}
 }
 
@@ -335,6 +353,22 @@ public Action Command_SetPlayerWallet(int client, int args) {
 	return Plugin_Handled;
 }
 
+public Action Command_CreateFakeClient(int client, int args) {
+	char name[32];	
+	if(args == 1) {
+		GetCmdArg(1, name, sizeof(name));
+		int clientIndex = CreateFakeClient(name);
+		PrintToClientEx(client, "Create client %s with index %i", name, clientIndex);
+	}
+	else {
+		PrintToClientEx(client, "Command only takes 1 argument (name)");
+	}
+	return Plugin_Handled;
+}
+
+//===MENUS
+
+
 
 
 
@@ -343,29 +377,24 @@ public Action Command_SetPlayerWallet(int client, int args) {
 //DATABASE
 //Inserts a new entry into the database
 static void SQL_InsertNew(int client) {
-	char query[250], playerAuth[32] = "";
+	char query[250], playerAuth[32];
 	GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));
 	Format(query, sizeof(query), "INSERT INTO %s ('ID') VALUES ('%s')", PlayerTableName, playerAuth);
 	SQL_TQuery(RPDMDatabase, SQL_InsertCallback, query, client);
-	SQL_Load(client);
-	PrintToServer("[RPDM] Inserted & loaded new player: %s", playerAuth);
 }
 
 //Load player call
 static void SQL_Load(int client) {
 	char query[200];
-	//INIT
 	Format(query, sizeof(query), "SELECT * FROM `%s` WHERE `ID` = '%s'", PlayerTableName, PlySteamAuth[client]);
 	SQL_TQuery(RPDMDatabase, SQL_LoadCallback, query, client);
-	LogMessage("[RPDM] Successfully loaded profile: %s", PlySteamAuth[client]);
 }
 
 static void SQL_Save(int clientIndex) {
 	char query[200];
 	int client = GetClientUserId(clientIndex);
-
 	Format(query, sizeof(query), "UPDATE %s SET Wallet = '%i', Bank = '%i', Salary = '%i', Debt = '%i', Kills = '%i', Level = '%i', XP = '%d' WHERE ID = '%s'", PlayerTableName, PlyWallet[client], PlyBank[client], PlySalary[client], PlyDebt[client], PlyKills[client], PlyLevel[client], PlyXP[client], PlySteamAuth[client]);
-	SQL_TQuery(RPDMDatabase, SQL_SaveCallback, query);
+	SQL_TQuery(RPDMDatabase, SQL_SaveCallback, query, clientIndex);
 }
 
 //Inital database call
@@ -386,20 +415,13 @@ static Action SQL_CreateDatabase() {
 	char query[600];
 	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('ID' VARCHAR(32), Wallet INT(9) NOT NULL DEFAULT 0,Bank INT(9) NOT NULL DEFAULT 100,Salary INT(9) NOT NULL DEFAULT 1,Debt INT(9) NOT NULL DEFAULT 0,Kills INT(9) NOT NULL DEFAULT 0,Level INT(9) NOT NULL DEFAULT 1,XP DECIMAL(10,5) NOT NULL DEFAULT 0)", PlayerTableName);
 	SQL_TQuery(RPDMDatabase, SQL_CreateCallback, query);
-	PrintToServer("[RPDM] Loaded database");
 	return Plugin_Handled;
 }
 
 //Load callback function
 static void SQL_LoadCallback(Handle owner, Handle hndl, const char[] error, any data) {
-	if(data == 0) return;
-	if(hndl == null) {
-		PrintToServer("[RPDM] Found error on LoadPlayer: %s", error);
-		LogError("[RPDM] Found error on LoadPlayer: %s", error);
-		return;
-	}
-	else {
-		if(!SQL_GetRowCount(hndl)){
+	if(hndl != null) {
+		if(!SQL_GetRowCount(hndl)) {
 			SQL_InsertNew(data);
 		}
 		else {
@@ -415,11 +437,22 @@ static void SQL_LoadCallback(Handle owner, Handle hndl, const char[] error, any 
 			PrintToServer("[RPDM] Profile loaded successfully: %s", PlySteamAuth[data]);
 		}
 	}
+	else {
+		PrintToServer("[RPDM] Found error on LoadPlayer: %s", error);
+		LogError("[RPDM] Found error on LoadPlayer: %s", error);
+		return;
+	}
 }
 
 //Insert callback function
 static void SQL_InsertCallback(Handle owner, Handle hndl, const char[] error, any data) {
-	if(hndl == null) {
+	if(hndl != null) {
+		char playerName[32];
+		GetClientName(data, playerName, sizeof(playerName));
+		SQL_Load(data);
+		PrintToServer("[RPDM] Inserted new player: %s", playerName);
+	}
+	else {
 		PrintToServer("[RPDM] Error at SQL_InsertCallback: %s", error);
 		LogError("[RPDM] Error at SQL_InsertCallback: %s", error);
 	}
@@ -427,18 +460,27 @@ static void SQL_InsertCallback(Handle owner, Handle hndl, const char[] error, an
 
 //Save callback function
 static void SQL_SaveCallback(Handle owner, Handle hndl, const char[] error, any data) {
-	if(hndl == null) {
+	if(hndl != null) {
+		char playerName[32];
+		GetClientName(data, playerName, sizeof(playerName));
+		PrintToServer("[RPDM] Saved client: %s", playerName);
+	}
+	else {
 		PrintToServer("[RPDM] Error at SQL_SaveCallback: %s", error);
 		LogError("[RPDM] Error at SQL_SaveCallback: %s", error);
-	} 
+	}
 }
 
 //Create callback function
 static void SQL_CreateCallback(Handle owner, Handle hndl, const char[] error, any data) {
-	if(hndl == null) {
+	if(hndl != null) {
+		PrintToServer("[RPDM] Successfully loaded / created database.");
+		LogError("[RPDM] Successfully loaded / created database.");
+	}
+	else {
 		PrintToServer("[RPDM] Error at SQL_CreateCallback: %s", error);
 		LogError("[RPDM] Error at SQL_CreateCallback: %s", error);
-	} 
+	}
 }
 
 
@@ -485,6 +527,18 @@ public int GetKillAmount(int client) {
 
 public float GetXpAmount(int client) {
 	return (PlyLevel[client] * 2.0);
+}
+
+public void StripWeapons(int client) {
+
+}
+
+public float GetEntityDistance(int client, int entity) {
+	float playerPos[3], entityPos[3], retVal;
+	GetClientAbsOrigin(client, playerPos);
+	GetEntPropVector(entity, Prop_Send, "m_vecOrigin", entityPos);
+	retVal = GetVectorDistance(playerPos, entityPos, false);
+	return retVal;
 }
 
 public void InitialiseGlobals(int client) {
