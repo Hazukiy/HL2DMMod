@@ -6,12 +6,14 @@
 #pragma newdecls required
 
 //Server/Plugin related globals
+static float[] PlayerSpawnPos = {-1002412101, -1006626218, -1012073472};
+static float[] CopSpawnPos = {-1017074004, -1132854018, -1026297856};
 char DatabaseName[] = "RPDM";
 char PlayerTableName[] = "Players";
 char PLUGIN_VERSION[5] = "1.0.0";
 char AdvertArr[] = {"Type {green}!cmds{default} or {green}/cmds{default}", "Test", "text2" };
 char CmdArr[2][20] = { "sm_uptime", "sm_cmds" };
-float[] HudPosition = {0.015, -0.60, 1.0}; //X,Y,Holdtime
+float[] HudPosition = {0.015, -0.50, 1.0}; //X,Y,Holdtime
 int HudColor[4] = {45, 173, 107, 255}; //RGBA 
 int TotalUptime;
 int CurrentAdvertPos;
@@ -29,13 +31,16 @@ int PlySalary[MAXPLAYERS + 1];
 int PlyDebt[MAXPLAYERS + 1];
 int PlyKills[MAXPLAYERS + 1];
 int PlyLevel[MAXPLAYERS + 1];
+int PlyIsCop[MAXPLAYERS + 1];
 float PlyXP[MAXPLAYERS + 1];
+
 
 //Player non-database globals
 int PlySalaryCount[MAXPLAYERS + 1];
 bool PlyHasMenuOpen[MAXPLAYERS + 1];
 Handle PlySalaryTimer[MAXPLAYERS + 1];
 Handle PlyHudTimer[MAXPLAYERS + 1];
+Handle PlyCheckDoor[MAXPLAYERS + 1];
 
 public Plugin myinfo = {
 	name        = "RP-DM Mod",
@@ -54,6 +59,9 @@ public void OnPluginStart() {
 	RegAdminCmd("sm_reload", Command_ReloadServer, ADMFLAG_ROOT, "Reloads server on current map.");
 	RegAdminCmd("sm_setwallet", Command_SetPlayerWallet, ADMFLAG_ROOT, "Sets the players wallet.");
 	RegAdminCmd("sm_fakeclient", Command_CreateFakeClient, ADMFLAG_ROOT, "Creates and connects a fake client.");
+	RegAdminCmd("sm_getcords", Command_GetPlayerCords, ADMFLAG_ROOT, "Returns players current vector cords");
+	RegAdminCmd("sm_testdisplay", Command_TestDisplay, ADMFLAG_ROOT, "DEBUG: Used for testing hud cords");
+	RegAdminCmd("sm_setcop", Command_SetPlayerCop, ADMFLAG_ROOT, "Gives the player cop.");
 
 	//Register forwards
 	HookEvent("player_connect_client", Event_PlayerConnectClient, EventHookMode_Pre);
@@ -62,6 +70,7 @@ public void OnPluginStart() {
 	HookEvent("player_death", Event_PlayerDeath, EventHookMode_Pre);
 	HookEvent("player_activate", Event_PlayerActivate, EventHookMode_Pre);
 	HookEvent("player_team", Event_PlayerTeam, EventHookMode_Pre);
+	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Pre);
 	
 	//Add listener for chat to override
 	AddCommandListener(Event_PlayerChat, "say");
@@ -110,6 +119,11 @@ public void OnClientDisconnect(int client) {
 		PlyHudTimer[client] = null;
 	}
 
+	if(PlyCheckDoor[client] != null) {
+		KillTimer(PlyCheckDoor[client]);
+		PlyCheckDoor[client] = null;
+	}
+
 	PlySteamAuth[client] = "";
 	PlyWallet[client] = 0;
 	PlyBank[client] = 0;
@@ -117,10 +131,9 @@ public void OnClientDisconnect(int client) {
 	PlyDebt[client] = 0;
 	PlyKills[client] = 0;
 	PlyLevel[client] = 0;
+	PlyIsCop[client] = 0;
 	PlyXP[client] = 0.00;
 	PlySalaryCount[client] = 0;
-	PlySalaryTimer[client] = null;
-	PlyHudTimer[client] = null;
 	CurrentPlayerCount--;
 }
 
@@ -156,6 +169,8 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
 	client = GetClientOfUserId(event.GetInt("userid", 0));
 	attacker = GetClientOfUserId(event.GetInt("attacker", 0));
 
+	if(client == attacker) { PrintToClientEx(client, "You killed yourself."); return Plugin_Handled; }
+
 	if(IsClientConnected(client) && IsClientInGame(client) && client != 0) {
 		if(!IsClientConnected(attacker)) {
 			PrintToClientEx(client, "You've been killed by an unknown entity.");
@@ -170,6 +185,7 @@ public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadca
 		PlyKills[attacker]++;
 		PlyWallet[attacker]+= amount;
 		PrintToClientEx(attacker, "You've killed {fullred}%s{default} and earned {green}$%i{default}", victimName, amount);
+		SQL_Save(attacker);
 	}
 	return Plugin_Handled;
 }
@@ -189,8 +205,8 @@ public Action Event_PlayerChat(int client, const char[] command, int argc) {
 		}
 	}
 
-	if(IsClientAuthorized(client)) {
-		prefix = "{orange}Admin{default}";
+	if(GetUserAdmin(client) != INVALID_ADMIN_ID) {
+		prefix = "{aqua}Admin{default}";
 	}
 	else {
 		prefix = "Player";
@@ -200,6 +216,18 @@ public Action Event_PlayerChat(int client, const char[] command, int argc) {
 	//(Player) SirTiggs: hello
 	ChatToAll("(%s) {green}%s{default}: {ghostwhite}%s{default}", prefix, playerName, buffer);
 	return Plugin_Handled;
+}
+
+public Action Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
+	int client = GetClientOfUserId(event.GetInt("userid", 0));
+	if(PlyIsCop[client] == 1) {
+		TeleportEntity(client, CopSpawnPos, NULL_VECTOR, NULL_VECTOR);
+	}
+	else {
+		TeleportEntity(client, PlayerSpawnPos, NULL_VECTOR, NULL_VECTOR);
+	}
+	StripWeapons(client);
+	return Plugin_Continue;
 }
 
 public Action Event_PlayerConnectClient(Event event, const char[] name, bool dontBroadcast) {
@@ -308,6 +336,28 @@ public void Menu_OpenPlayer(int client)
 
 
 //==TIMERS==
+
+//Used to check if player
+public Action Timer_CheckDoorHud(Handle timer, any client) {
+	int entity = GetClientAimTarget(client, false);
+	if(entity == -1 || entity == -2) return Plugin_Continue;
+	if(!IsValidEntity(entity)) return Plugin_Continue;
+
+	char entClassname[32];
+	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+	if(!result) return Plugin_Continue;
+	if(StrEqual(entClassname, "func_door_rotating", false) || StrEqual(entClassname, "func_door", false)) {
+		int distance = FloatToInt(GetEntityDistance(client, entity));
+		if(distance <= 100) {
+			char buffer[255];
+			Format(buffer, sizeof(buffer), "Property for sale: $10,000");
+			SetHudTextParams(-1.0, -1.0, 1.0, 0, 255, 0, 255, 0, 0.0, 0.0, 0.0);
+			ShowHudText(client, -1, buffer);
+		}
+	}
+	return Plugin_Continue;
+}
+
 public Action Timer_CalculateUptime(Handle timer) {
 	TotalUptime++;
 	return Plugin_Continue;
@@ -319,13 +369,13 @@ public Action Timer_CalculateSalary(Handle timer, any client) {
 		PlyBank[client] += PlySalary[client];
 	}
 	PlySalaryCount[client]--;
+	SQL_Save(client);
 	return Plugin_Continue;
 }
 
 public Action Timer_ProcessHud(Handle timer, any client) {
 	if(IsClientInGame(client)) {
-		char hudText[512];
-		char goodGrammar[32];
+		char hudText[512], goodGrammar[32], copString[32];
 
 		//Lel
 		if(PlySalaryCount[client] == 1) {
@@ -335,17 +385,35 @@ public Action Timer_ProcessHud(Handle timer, any client) {
 			goodGrammar = "Seconds";
 		}
 
-		char reWallet[32], reBank[32], reDebt[32], reSalary[32], reKills[32];
+		//HUD PARAMS
+		//float x, float y, float holdtime, int r, int g, int b, int a, int effect=0, float fxtime=1.0, float fadein =0.0, float fadeout =0.0
+
+		//MAIN HUD
+		char reWallet[32], reBank[32], reDebt[32], reSalary[32], reKills[32], isCop[32];
 		FormatNumber(PlyWallet[client], reWallet, sizeof(reWallet));
 		FormatNumber(PlyBank[client], reBank, sizeof(reBank));
 		FormatNumber(PlyDebt[client], reDebt, sizeof(reDebt));
 		FormatNumber(PlySalary[client], reSalary, sizeof(reSalary));
 		FormatNumber(PlyKills[client], reKills, sizeof(reKills));
 
-		Format(hudText, sizeof(hudText), "Wallet: $%s\nBank: $%s\nDebt: $%s\nSalary: $%s\nNext Pay: %i %s\nKills: %s\nLevel: %i\nXP: %d/100", 
-			reWallet, reBank, reDebt, reSalary, PlySalaryCount[client], goodGrammar, reKills, PlyLevel[client], PlyXP[client]);
-		SetHudTextParams(HudPosition[0], HudPosition[1], HudPosition[2], HudColor[0], HudColor[1], HudColor[2], HudColor[3], 0, 0.0, 0.0);
+		if(PlyIsCop[client] == 1) 
+		{
+			isCop = "Yes";
+		}
+		else {
+			isCop = "No";
+		}
+
+		Format(hudText, sizeof(hudText), "Wallet: $%s\nBank: $%s\nDebt: $%s\nSalary: $%s\nNext Pay: %i %s\nKills: %s\nLevel: %i\nXP: %d/100\nIsCop: %s", 
+			reWallet, reBank, reDebt, reSalary, PlySalaryCount[client], goodGrammar, reKills, PlyLevel[client], PlyXP[client], isCop);
+		SetHudTextParams(HudPosition[0], HudPosition[1], HudPosition[2], HudColor[0], HudColor[1], HudColor[2], HudColor[3], 0, 1.0, 0.1, 0.1);
 		ShowHudText(client, -1, hudText);
+
+		//Top hud
+		char buffer[255];
+		FormatTime(buffer, sizeof(buffer), "Server Uptime: %H Hours %M Minutes %S Seconds", TotalUptime);
+		SetHudTextParams(-1.0, 0.01, 1.0, 0, 255, 255, 255, 0, 1.0, 0.1, 0.1);
+		ShowHudText(client, -1, buffer);
 	}
 	return Plugin_Continue;
 }
@@ -398,6 +466,42 @@ public Action Command_GetCommands(int client, int args) {
 		if(i == 0) PrintToConsole(client, "===COMMAND LIST===");
 		PrintToConsole(client, "%i. %s", i, CmdArr[i]);
 	}
+	return Plugin_Handled;
+}
+
+public Action Command_GetPlayerCords(int client, int args) {
+	float pos[3];
+	GetClientAbsOrigin(client, pos);
+	PrintToClientEx(client, "Cords: X:{green}%d{default} Y:{green}%d{default} Z:{green}%d{default}", pos[0], pos[1], pos[2]);
+	return Plugin_Handled;
+}
+
+public Action Command_TestDisplay(int client, int args) {
+	char xBuffer[5], yBuffer[5];
+	float x = 0.0, y = 0.0;
+
+	GetCmdArg(1, xBuffer, sizeof(xBuffer));
+	GetCmdArg(2, yBuffer, sizeof(yBuffer));
+
+	x = StringToFloat(xBuffer);
+	y = StringToFloat(yBuffer);
+
+	SetHudTextParams(x, y, 1.0, 255, 0, 0, 255, 1, 4.0, 4.0, 4.0);
+	ShowHudText(client, -1, "[This is a test]");
+	return Plugin_Handled;
+}
+
+public Action Command_SetPlayerCop(int client, int args) {
+	char arg1[32], playerName[32];
+	GetCmdArg(1, arg1, sizeof(arg1));
+
+	int target = FindTarget(client, arg1, true, false);
+	if (target == -1) { PrintToClientEx(client, "Could not find player."); return Plugin_Handled; }
+
+	PlyIsCop[target] = 1;
+	GetClientName(target, playerName, sizeof(playerName));
+	PrintToClientEx(client, "Gave %s cop.", playerName);
+	SQL_Save(target);
 	return Plugin_Handled;
 }
 
@@ -465,8 +569,9 @@ static void SQL_Load(int client) {
 static void SQL_Save(int clientIndex) {
 	char query[200];
 	int client = GetClientUserId(clientIndex);
-	Format(query, sizeof(query), "UPDATE %s SET Wallet = '%i', Bank = '%i', Salary = '%i', Debt = '%i', Kills = '%i', Level = '%i', XP = '%d' WHERE ID = '%s'", PlayerTableName, PlyWallet[client], PlyBank[client], PlySalary[client], PlyDebt[client], PlyKills[client], PlyLevel[client], PlyXP[client], PlySteamAuth[client]);
+	Format(query, sizeof(query), "UPDATE %s SET Wallet = '%i', Bank = '%i', Salary = '%i', Debt = '%i', Kills = '%i', Level = '%i', IsCop = '%i', XP = '%d' WHERE ID = '%s'", PlayerTableName, PlyWallet[client], PlyBank[client], PlySalary[client], PlyDebt[client], PlyKills[client], PlyLevel[client], PlyIsCop[client], PlyXP[client], PlySteamAuth[client]);
 	SQL_TQuery(RPDMDatabase, SQL_SaveCallback, query, clientIndex);
+	PrintToServer("Profile %s saved.", PlySteamAuth[client]);
 }
 
 //Inital database call
@@ -485,7 +590,7 @@ static void SQL_Initialise() {
 //Creates or loads database
 static Action SQL_CreateDatabase() {
 	char query[600];
-	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('ID' VARCHAR(32), Wallet INT(9) NOT NULL DEFAULT 0,Bank INT(9) NOT NULL DEFAULT 100,Salary INT(9) NOT NULL DEFAULT 1,Debt INT(9) NOT NULL DEFAULT 0,Kills INT(9) NOT NULL DEFAULT 0,Level INT(9) NOT NULL DEFAULT 1,XP DECIMAL(10,5) NOT NULL DEFAULT 0)", PlayerTableName);
+	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('ID' VARCHAR(32), Wallet INT(9) NOT NULL DEFAULT 0,Bank INT(9) NOT NULL DEFAULT 100,Salary INT(9) NOT NULL DEFAULT 1,Debt INT(9) NOT NULL DEFAULT 0,Kills INT(9) NOT NULL DEFAULT 0,Level INT(9) NOT NULL DEFAULT 1, IsCop INT(9) NOT NULL DEFAULT 0, XP DECIMAL(10,5) NOT NULL DEFAULT 0)", PlayerTableName);
 	SQL_TQuery(RPDMDatabase, SQL_CreateCallback, query);
 	return Plugin_Handled;
 }
@@ -503,9 +608,13 @@ static void SQL_LoadCallback(Handle owner, Handle hndl, const char[] error, any 
 			PlyDebt[data] = SQL_FetchInt(hndl, 4);
 			PlyKills[data] = SQL_FetchInt(hndl, 5);
 			PlyLevel[data] = SQL_FetchInt(hndl, 6);
-			PlyXP[data] = SQL_FetchFloat(hndl, 7);
+			PlyIsCop[data] = SQL_FetchInt(hndl, 7);
+			PlyXP[data] = SQL_FetchFloat(hndl, 8);
+
+			//Timers
 			PlySalaryTimer[data] = CreateTimer(1.0, Timer_CalculateSalary, data, TIMER_REPEAT);
 			PlyHudTimer[data] = CreateTimer(1.0, Timer_ProcessHud, data, TIMER_REPEAT);
+			PlyCheckDoor[data] = CreateTimer(1.0, Timer_CheckDoorHud, data, TIMER_REPEAT);
 			PrintToServer("[RPDM] Profile loaded successfully: %s", PlySteamAuth[data]);
 		}
 	}
@@ -626,6 +735,21 @@ public void FormatNumber(int Number, char Output[32], int MaxLen) {
 }
 
 public void StripWeapons(int client) {
+	for(int i = 0; i <= 32; i++)  {
+		int result = GetPlayerWeaponSlot(client, i);
+		if(result != -1) {
+			RemovePlayerItem(client, result);
+		}
+	}
+}
+
+public void GiveCopOutfit(int client) {
+
+
+}
+
+public void GivePlayerOutfit(int client) {
+
 
 }
 
