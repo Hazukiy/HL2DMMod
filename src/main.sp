@@ -5,13 +5,34 @@
 #pragma semicolon 1
 #pragma newdecls required
 
+//Max doors that a player can own.
+#define MAXDOORS "100";
+
 //Server/Plugin related globals
+//TODO: Make these disgusting hardcoded values configurable in a .cfg
 static float[] PlayerSpawnPos = {-1010880884, -1006738180, 1143341568};
 static float[] CopSpawnPos = {1158345176, 1145932102, 1147666944};
-static char PlayerModels[50] = "models/humans/group03/male_01.mdl";
+static char PlayerModels[][50] = {
+"models/humans/group01/female_01.mdl",
+"models/humans/group01/female_02.mdl",
+"models/humans/group01/female_03.mdl",
+"models/humans/group01/female_04.mdl",
+"models/humans/group01/female_05.mdl",
+"models/humans/group01/female_06.mdl",
+"models/humans/group01/female_07.mdl",
+"models/humans/group01/male_01.mdl",	
+"models/humans/group01/male_02.mdl",
+"models/humans/group01/male_03.mdl",
+"models/humans/group01/male_04.mdl",
+"models/humans/group01/male_05.mdl",
+"models/humans/group01/male_06.mdl",
+"models/humans/group01/male_07.mdl",
+"models/humans/group01/male_08.mdl",
+"models/humans/group01/male_09.mdl"};
 static char PoliceModel[50] = "models/police.mdl";
 char DatabaseName[] = "RPDM";
 char PlayerTableName[] = "Players";
+char ServerTableName[] = "Server";
 char PLUGIN_VERSION[5] = "1.0.0";
 char AdvertArr[] = {"Type {green}!cmds{default} or {green}/cmds{default}", "Test", "text2" };
 char CmdArr[2][20] = { "sm_uptime", "sm_cmds" };
@@ -35,6 +56,8 @@ int PlyKills[MAXPLAYERS + 1];
 int PlyLevel[MAXPLAYERS + 1];
 int PlyIsCop[MAXPLAYERS + 1];
 float PlyXP[MAXPLAYERS + 1];
+int PlyDoorsOwned[MAXPLAYERS + 1][10000];
+bool PlyDoorLocked[MAXPLAYERS + 1][10000];
 
 
 //Player non-database globals
@@ -66,6 +89,8 @@ public void OnPluginStart() {
 	RegAdminCmd("sm_setcop", Command_SetPlayerCop, ADMFLAG_ROOT, "Gives the player cop.");
 	RegAdminCmd("sm_strip", Command_StripWeapons, ADMFLAG_ROOT, "Strips a targets weapons");
 	RegAdminCmd("sm_giveweapons", Command_GivePlayerWeapons, ADMFLAG_ROOT, "Gives the target weapons.");
+	RegAdminCmd("sm_changemodel", Command_ChangePlayerModel, ADMFLAG_ROOT, "Changes the players model.");
+	RegAdminCmd("sm_givedoor", Command_GiveDoor, ADMFLAG_ROOT, "Gives a target door permissions");
 
 	//Register forwards
 	HookEvent("player_connect_client", Event_PlayerConnectClient, EventHookMode_Pre);
@@ -97,23 +122,14 @@ public void OnPluginEnd() {
 
 public void OnMapStart() {
 	PrecacheModel("models/police.mdl", true);
-	//PrecacheModel("models/humans/group03/male_01.mdl", true);
 
-	/*for(int i = 0; i < sizeof(PlayerModels); i++) {
-		PrecacheModel(PlayerModels[i], true);
-	}*/
-
-
-
-	/*PrecacheModel("models/player/group01/male_03.mdl", true);
-	PrecacheModel("models/player/group01/male_04.mdl", true);
-	PrecacheModel("models/player/group01/male_05.mdl", true);
-	PrecacheModel("models/player/group01/male_06.mdl", true);
-
-	PrecacheModel("models/player/group01/female_05.mdl", true);
-	PrecacheModel("models/player/group01/female_06.mdl", true);
-	PrecacheModel("models/player/group01/female_04.mdl", true);
-	PrecacheModel("models/player/group01/female_03.mdl", true);*/
+	//Dynamic precaching
+	for(int i = 0; i < sizeof(PlayerModels); i++) {
+		int result = PrecacheModel(PlayerModels[i], true);
+		if(result == 0) {
+			PrintToServer("[RPDM] - Failed to precache model: %s", PlayerModels[i]);
+		}
+	}
 
 	PrecacheSound("Friends/friend_join.wav", true);
 }
@@ -206,6 +222,7 @@ public void OnClientDisconnect(int client) {
 	}*/
 }
 
+//This doesn't work for some reason...probs not supported
 public Action OnGetGameDescription(char gameDesc[64]) {
 	gameDesc = "HL2 Roleplay";
 	return Plugin_Changed; 
@@ -353,6 +370,10 @@ public Action OnPlayerRunCmd(int client, int& buttons, int& impulse, float vel[3
 		//Are we looking at a player?
 		Use_ProcessPlayerFunc(client);
 	}
+
+	if(buttons == IN_SPEED) {
+		Shift_ProcessDoorFunc(client);
+	}
 	return Plugin_Continue;
 }
 
@@ -365,11 +386,39 @@ public void Use_ProcessDoorFunc(int client) {
 	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
 
 	if(!result) return;
-	if(StrEqual(entClassname, "func_door_rotating", false) || StrEqual(entClassname, "func_door", false)) {
+	if(IsValidDoor(entClassname)) {
 		int distance = FloatToInt(GetEntityDistance(client, entity));
 		if(distance <= 80) {
 			if(GetUserAdmin(client) != INVALID_ADMIN_ID) {
-				AcceptEntityInput(entity, "Open");
+				AcceptEntityInput(entity, "Toggle");
+			}
+		}
+	}
+}
+
+public void Shift_ProcessDoorFunc(int client) {
+	int entity = GetClientAimTarget(client, false);
+	if(entity == -1 || entity == -2) return;
+	if(!IsValidEntity(entity)) return;
+
+	char entClassname[32];
+	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+
+	if(!result) return;
+	if(IsValidDoor(entClassname)) {
+		int distance = FloatToInt(GetEntityDistance(client, entity));
+		if(distance <= 80) {
+			if(HasUserGotDoor(client, entity)) {
+				if(PlyDoorLocked[client][entity]) {
+					AcceptEntityInput(entity, "Unlock");
+					PlyDoorLocked[client][entity] = false;
+					PrintToClientEx(client, "Unlocked door");
+				}
+				else {
+					AcceptEntityInput(entity, "Lock");
+					PlyDoorLocked[client][entity] = true;
+					PrintToClientEx(client, "Locked door");
+				}
 			}
 		}
 	}
@@ -564,11 +613,11 @@ public void ProcessDoor(int client) {
 	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
 	if(!result) return;
 
-	if(StrEqual(entClassname, "func_door_rotating", false) || StrEqual(entClassname, "func_door", false)) {
+	if(IsValidDoor(entClassname)) {
 		int distance = FloatToInt(GetEntityDistance(client, entity));
 		if(distance <= 100) {
 			char buffer[255];
-			Format(buffer, sizeof(buffer), "This is a door");
+			Format(buffer, sizeof(buffer), "Door ID: %i", entity);
 			SetHudTextParams(-1.0, -1.0, 1.0, 0, 255, 0, 255, 0, 0.0, 0.0, 0.0);
 			ShowHudText(client, -1, buffer);
 		}
@@ -584,9 +633,9 @@ public void ProcessPlayer(int client) {
 		int distance = FloatToInt(GetEntityDistance(client, entity));
 		if(distance <= 100) {
 			char buffer[255], reWallet[32], reSalary[32], reKills[32];
-			FormatNumber(PlyWallet[client], reWallet, sizeof(reWallet));
-			FormatNumber(PlySalary[client], reSalary, sizeof(reSalary));
-			FormatNumber(PlyKills[client], reKills, sizeof(reKills));
+			FormatNumber(PlyWallet[entity], reWallet, sizeof(reWallet));
+			FormatNumber(PlySalary[entity], reSalary, sizeof(reSalary));
+			FormatNumber(PlyKills[entity], reKills, sizeof(reKills));
 
 			Format(buffer, sizeof(buffer), "Wallet: $%s\nSalary: $%i\nKills: %i", reWallet, reSalary, reKills);
 			SetHudTextParams(-1.0, -1.0, 1.0, 255, 255, 0, 255, 0, 0.0, 0.0, 0.0);
@@ -604,7 +653,7 @@ public void ProcessCopOutfit(int client) {
 }
 
 public void ProcessPlayerOutfit(int client) {
-	int index = GetRandomInt(0, sizeof(PlayerModels));
+	int index = GetRandomInt(0, sizeof(PlayerModels) - 1);
 	SetEntityModel(client, PlayerModels[index]);
 	SetEntityHealth(client, 100);
 	GivePlayerItem(client, "weapon_physcannon");
@@ -758,6 +807,51 @@ public Action Command_GivePlayerWeapons(int client, int args) {
 	PrintToClientEx(client, "You've given {green}%s{default} weapons", playerName);
 	PrintToClientEx(target, "You've been given weapons.");
 	CreateTimer(0.3, Timer_GiveWeapons, target);
+	return Plugin_Handled;
+}
+
+public Action Command_ChangePlayerModel(int client, int args) {
+	if(args != 1) { PrintToClientEx(client, "Command takes 1 argument (modelname)"); return Plugin_Handled; }
+
+	char arg1[64];
+	GetCmdArg(1, arg1, sizeof(arg1));
+
+	//TODO: Add validation checks against input argument
+	if(!IsModelPrecached(arg1)) {
+		PrecacheModel(arg1, true);
+	}
+
+	SetEntityModel(client, arg1);
+	PrintToClientEx(client, "You've changed your skin to: {green}%s{default}", arg1);
+	return Plugin_Handled;
+}
+
+public Action Command_GiveDoor(int client, int args) {
+	if(args != 1) { PrintToClientEx(client, "Command takes 1 argument (playername)"); return Plugin_Handled; }
+
+	char arg1[32], targetName[32];
+	GetCmdArg(1, arg1, sizeof(arg1));
+
+	int target = FindTarget(client, arg1);
+	if (target == -1) { PrintToClientEx(client, "Could not find player."); return Plugin_Handled; }
+
+	int entity = GetClientAimTarget(client, false);
+	if(entity == -1 || entity == -2) { PrintToClientEx(client, "Entity was invalid"); return Plugin_Handled; }
+	if(!IsValidEntity(entity)) { PrintToClientEx(client, "Not a valid entity"); return Plugin_Handled; }
+
+	char entClassname[32];
+	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+	if(!result) { PrintToClientEx(client, "Failed to get classname"); return Plugin_Handled; }
+
+	if(IsValidDoor(entClassname)) {
+		int distance = FloatToInt(GetEntityDistance(client, entity));
+		if(distance <= 100) {
+			GetClientName(target, targetName, sizeof(targetName));
+			AddDoor(target, entity);
+			PrintToClientEx(client, "You've given {green}%s{default} door {fullred}%i{default}", targetName, entity);
+			PrintToClientEx(target, "You've been given access to door {green}%i{default} by {fullred}%s{default}", entity, targetName);
+		}
+	}
 	return Plugin_Handled;
 }
 
@@ -932,6 +1026,31 @@ public int FloatToInt(float value) {
 	char strVal[10];
 	FloatToString(value, strVal, sizeof(strVal));
 	return StringToInt(strVal);
+}
+
+public bool HasUserGotDoor(int client, int entity) {
+	bool retVal = false;
+	if(PlyDoorsOwned[client][entity] != 0) {
+		retVal = true;
+	}
+	return retVal;
+}
+
+public void AddDoor(int client, int entity) {
+	PlyDoorsOwned[client][entity] = entity;
+	PlyDoorLocked[client][entity] = false;
+
+	//Make sure door is open and unlocked
+	AcceptEntityInput(entity, "Unlock");
+	AcceptEntityInput(entity, "Toggle");
+}
+
+public bool IsValidDoor(char entClassname[32]) {
+	bool retVal = false;
+	if(StrEqual(entClassname, "func_door_rotating", false) || StrEqual(entClassname, "func_door", false) || StrEqual(entClassname, "prop_door_rotating", false)) {
+		retVal = true;
+	}
+	return retVal;
 }
 
 public void FormatNumber(int Number, char Output[32], int MaxLen) {
