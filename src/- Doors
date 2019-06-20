@@ -1,0 +1,18 @@
+Doors
+----
+> DoorID (VARCHAR) KEY
+> RelationID (VARCHAR) CAN BE NULL
+> OwnerAuthID (VARCHAR) CAN BE NULL
+> Notice (VARCHAR) DEFAULT "SET NOTICE"
+> IsPolice (TINYINT) DEFAULT "0"
+> IsOwned (TINYINT) DEFAULT "0"
+> CanBuy (TINYINT) DEFAULT "0"
+> Price (INT) DEFAULT "0"
+
+Spawn
+-------
+> ID (INT) KEY
+> PlayerSpawns (REAL) CAN BE NULL
+> CopSpawns (REAL) CAN BE NULL 
+
+#DoorTableName

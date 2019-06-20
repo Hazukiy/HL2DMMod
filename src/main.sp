@@ -5,13 +5,15 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-//Max doors that a player can own.
-#define MAXDOORS "100";
-
 //Server/Plugin related globals
 //TODO: Make these disgusting hardcoded values configurable in a .cfg
-static float[] PlayerSpawnPos = {-1010880884, -1006738180, 1143341568};
-static float[] CopSpawnPos = {1158345176, 1145932102, 1147666944};
+char DatabaseName[] = "Roleplay";
+char PlayerTableName[] = "Players";
+char DoorTableName[] = "Doors";
+char SpawnPath[];
+static Handle RPDMDatabase;
+static float[] PlayerSpawnPos = {-1015474985, -1007978495, 1143341568};
+static float[] CopSpawnPos = {1157682742, 1149416807, 1147666944};
 static char PlayerModels[][50] = {
 "models/humans/group01/female_01.mdl",
 "models/humans/group01/female_02.mdl",
@@ -30,20 +32,19 @@ static char PlayerModels[][50] = {
 "models/humans/group01/male_08.mdl",
 "models/humans/group01/male_09.mdl"};
 static char PoliceModel[50] = "models/police.mdl";
-char DatabaseName[] = "RPDM";
-char PlayerTableName[] = "Players";
-char ServerTableName[] = "Server";
-char PLUGIN_VERSION[5] = "1.0.0";
-char AdvertArr[] = {"Type {green}!cmds{default} or {green}/cmds{default}", "Test", "text2" };
-char CmdArr[2][20] = { "sm_uptime", "sm_cmds" };
+char PLUGIN_VERSION[] = "1.0.1";
+char AdvertArr[] = {
+	"Type {green}!cmds{default} or {green}/cmds{default} for a list of commands.", 
+	"Your salary increases every minute.", 
+	"You can buy a door by looking at it and typing {green}!buydoor{default}" };
+char CmdArr[][20] = { "sm_uptime", "sm_cmds", "sm_buydoor" };
 float[] HudPosition = {0.015, -0.50, 1.0}; //X,Y,Holdtime
-int HudColor[4] = {45, 173, 107, 255}; //RGBA 
+int HudColor[4] = {72, 117, 212, 255}; //RGBA 
 int TotalUptime;
 int CurrentAdvertPos;
 int CurrentPlayerCount;
 Handle UptimeTimer;
 Handle AdvertTimer;
-static Handle RPDMDatabase;
 
 //Player Database Globals
 //We'll perform actions on these then save to SQL database
@@ -56,16 +57,24 @@ int PlyKills[MAXPLAYERS + 1];
 int PlyLevel[MAXPLAYERS + 1];
 int PlyIsCop[MAXPLAYERS + 1];
 float PlyXP[MAXPLAYERS + 1];
-int PlyDoorsOwned[MAXPLAYERS + 1][10000];
-bool PlyDoorLocked[MAXPLAYERS + 1][10000];
-
+int PlyNextRaise[MAXPLAYERS + 1];
 
 //Player non-database globals
 int PlySalaryCount[MAXPLAYERS + 1];
-bool PlyHasMenuOpen[MAXPLAYERS + 1];
 Handle PlySalaryTimer[MAXPLAYERS + 1];
 Handle PlyHudTimer[MAXPLAYERS + 1];
 Handle PlyLookHit[MAXPLAYERS + 1];
+
+//Door globals
+int DoorRelationID[4096];
+char DoorOwnerAuthID[4096][32];
+char DoorNotice[4096][255];
+int DoorIsPolice[4096];
+int DoorIsOwned[4096];
+int DoorCanBuy[4096];
+int DoorPrice[4096];
+int DoorIsStore[4096];
+char DoorOwnerName[4096][32];
 
 public Plugin myinfo = {
 	name        = "RP-DM Mod",
@@ -80,6 +89,7 @@ public void OnPluginStart() {
 	//Register commands
 	RegConsoleCmd("sm_uptime", Command_GetUptime, "Returns the uptime of the server.");
 	RegConsoleCmd("sm_cmds", Command_GetCommands, "Returns a list of commands.");
+	RegConsoleCmd("sm_buydoor", Command_BuyDoor, "Buy a door.");
 
 	RegAdminCmd("sm_reload", Command_ReloadServer, ADMFLAG_ROOT, "Reloads server on current map.");
 	RegAdminCmd("sm_setwallet", Command_SetPlayerWallet, ADMFLAG_ROOT, "Sets the players wallet.");
@@ -91,6 +101,11 @@ public void OnPluginStart() {
 	RegAdminCmd("sm_giveweapons", Command_GivePlayerWeapons, ADMFLAG_ROOT, "Gives the target weapons.");
 	RegAdminCmd("sm_changemodel", Command_ChangePlayerModel, ADMFLAG_ROOT, "Changes the players model.");
 	RegAdminCmd("sm_givedoor", Command_GiveDoor, ADMFLAG_ROOT, "Gives a target door permissions");
+	RegAdminCmd("sm_setcopdoor", Command_SetCopDoor, ADMFLAG_ROOT, "Sets a cop door.");
+	RegAdminCmd("sm_setnotice", Command_SetDoorNotice, ADMFLAG_ROOT, "Sets a door's notice.");
+	RegAdminCmd("sm_setstore", Command_SetDoorStore, ADMFLAG_ROOT, "Sets a door as a store.");
+	RegAdminCmd("sm_setprice", Command_SetDoorPrice, ADMFLAG_ROOT, "Sets the price of a door.");
+	RegAdminCmd("sm_setdoor", Command_SetDoor, ADMFLAG_ROOT, "Sets the door as buyable");
 
 	//Register forwards
 	HookEvent("player_connect_client", Event_PlayerConnectClient, EventHookMode_Pre);
@@ -105,7 +120,7 @@ public void OnPluginStart() {
 	//Add listener for chat to override
 	AddCommandListener(Event_PlayerChat, "say");
 
-	//Load the database
+	//Load database
 	SQL_Initialise();
 
 	//Timers
@@ -122,6 +137,7 @@ public void OnPluginEnd() {
 
 public void OnMapStart() {
 	PrecacheModel("models/police.mdl", true);
+	PrecacheSound("Friends/friend_join.wav", true);
 
 	//Dynamic precaching
 	for(int i = 0; i < sizeof(PlayerModels); i++) {
@@ -131,7 +147,24 @@ public void OnMapStart() {
 		}
 	}
 
-	PrecacheSound("Friends/friend_join.wav", true);
+	//Dynamic get of all doors on map
+	for(int i = 0; i < 4096; i++) {
+		if(IsValidEntity(i)) {
+			char classname[32];
+			if(GetEntityClassname(i, classname, sizeof(classname))) {
+				if(IsValidDoor(classname)) {
+					SQL_LoadDoors(i);
+				}
+			}
+		}
+	}
+
+	char mapName[50];
+	GetCurrentMap(mapName, sizeof(mapName));
+
+	//Load file system
+	BuildPath(Path_SM, SpawnPath, 256, "data/roleplay/" + mapName + "player_spawns.txt");
+	if(!FileExists(SpawnPath)) PrintToServer("[RPDM] - Warning, cannot find path " + SpawnPath);
 }
 
 //Use this to setup timers ect
@@ -139,24 +172,9 @@ public void OnClientPostAdminCheck(int client) {
 	char authID[255];
 	GetClientAuthId(client, AuthId_Steam3, authID, sizeof(authID));
 	PlySteamAuth[client] = authID;
-
-	//Load player
+	
 	SQL_Load(client);
 	CurrentPlayerCount++;
-
-
-	/*if(!IsFakeClient(client)) {
-		char authID[255];
-		GetClientAuthId(client, AuthId_Steam3, authID, sizeof(authID));
-		PlySteamAuth[client] = authID;
-
-		//Load player
-		SQL_Load(client);
-		CurrentPlayerCount++;
-	}
-	else {
-		PrintToServer("RPDM - Found client to be fake, ignoring load.");
-	}*/
 }
 
 public void OnClientDisconnect(int client) {
@@ -186,40 +204,9 @@ public void OnClientDisconnect(int client) {
 	PlyLevel[client] = 0;
 	PlyIsCop[client] = 0;
 	PlyXP[client] = 0.00;
+	PlyNextRaise[client] = 0;
 	PlySalaryCount[client] = 0;
 	CurrentPlayerCount--;	
-
-
-	/*if(!IsFakeClient(client)) {
-		SQL_Save(client);
-
-		if(PlySalaryTimer[client] != null) {
-			KillTimer(PlySalaryTimer[client]);
-			PlySalaryTimer[client] = null;
-		}
-
-		if(PlyHudTimer[client] != null) {
-			KillTimer(PlyHudTimer[client]);
-			PlyHudTimer[client] = null;
-		}
-
-		if(PlyLookHit[client] != null) {
-			KillTimer(PlyLookHit[client]);
-			PlyLookHit[client] = null;
-		}
-
-		PlySteamAuth[client] = "";
-		PlyWallet[client] = 0;
-		PlyBank[client] = 0;
-		PlySalary[client] = 0;
-		PlyDebt[client] = 0;
-		PlyKills[client] = 0;
-		PlyLevel[client] = 0;
-		PlyIsCop[client] = 0;
-		PlyXP[client] = 0.00;
-		PlySalaryCount[client] = 0;
-		CurrentPlayerCount--;	
-	}*/
 }
 
 //This doesn't work for some reason...probs not supported
@@ -254,24 +241,27 @@ public Action Event_PlayerDisconnect(Event event, const char[] name, bool dontBr
 }
 
 public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
-	int client = 0, attacker = 0, amount = 0;
+	static int victim = 0, attacker = 0, amount = 0;
 	char victimName[32], attackerName[32];
 
-	client = GetClientOfUserId(event.GetInt("userid", 0));
+	victim = GetClientOfUserId(event.GetInt("userid", 0));
 	attacker = GetClientOfUserId(event.GetInt("attacker", 0));
 
-	if(client == attacker) { PrintToClientEx(client, "You killed yourself."); return Plugin_Handled; }
+	if(victim == 0) return Plugin_Handled;
+	if(attacker == 0) return Plugin_Handled;
 
-	if(IsClientConnected(client) && IsClientInGame(client) && client != 0) {
+	if(victim == attacker) { PrintToClientEx(victim, "You killed yourself."); return Plugin_Handled; }
+
+	if(IsClientConnected(victim) && IsClientInGame(victim) && victim != 0) {
 		if(!IsClientConnected(attacker)) {
-			PrintToClientEx(client, "You've been killed by an unknown entity.");
+			PrintToClientEx(victim, "You've been killed by an unknown entity.");
 		}
-		GetClientName(client, attackerName, sizeof(attackerName));
-		PrintToClientEx(client, "You've been killed by: {fullred}%s{default}", attackerName);
+		GetClientName(victim, attackerName, sizeof(attackerName));
+		PrintToClientEx(victim, "You've been killed by: {fullred}%s{default}", attackerName);
 	}
 
 	if(IsClientConnected(attacker) && IsClientInGame(attacker) && attacker != 0) {
-		GetClientName(client, victimName, sizeof(victimName));
+		GetClientName(victim, victimName, sizeof(victimName));
 		amount = GetKillAmount(attacker);
 		PlyKills[attacker]++;
 		PlyWallet[attacker]+= amount;
@@ -310,18 +300,26 @@ public Action Event_PlayerChat(int client, const char[] command, int argc) {
 }
 
 public Action Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
-	int client = GetClientOfUserId(event.GetInt("userid", 0));
-	//if(IsFakeClient(client)) return Plugin_Continue;
+	int player = GetClientOfUserId(event.GetInt("userid", 0));
+	//if(IsFakeClient(player)) return Plugin_Continue;
 
-	if(PlyIsCop[client] == 1 && GetClientTeam(client) != 2) {
-		ChangeClientTeam(client, 2);
+	if(PlyIsCop[player] == 1 && GetClientTeam(player) != 2) {
+		ChangeClientTeam(player, 2);
 	}
-	else if(PlyIsCop[client] != 1 && GetClientTeam(client) != 3) {
-		ChangeClientTeam(client, 3);
+	else if(PlyIsCop[player] != 1 && GetClientTeam(player) != 3) {
+		ChangeClientTeam(player, 3);
+	}
+	
+	if(PlyIsCop[player] == 1 && GetClientTeam(player) == 2 && IsPlayerAlive(player)) {
+		CreateTimer(0.1, Timer_StripWeapons, player);
+		CreateTimer(0.2, Timer_ProcessOutfit, player);
 	}
 
-	CreateTimer(0.3, Timer_StripWeapons, client);
-	CreateTimer(0.6, Timer_ProcessOutfit, client);
+	if(PlyIsCop[player] != 1 && GetClientTeam(player) == 3 && IsPlayerAlive(player)) {
+		CreateTimer(0.1, Timer_StripWeapons, player);
+		CreateTimer(0.2, Timer_ProcessOutfit, player);
+	}
+
 	return Plugin_Continue;
 }
 
@@ -345,10 +343,10 @@ public Action Event_PlayerActivate(Event event, const char[] name, bool dontBroa
 
 public Action Event_PlayerTeam(Event event, const char[] name, bool dontBroadcast) {
 	int teamIndex = event.GetInt("team", 0);
-	int client = GetClientOfUserId(event.GetInt("userid", 0));
+	int player = GetClientOfUserId(event.GetInt("userid", 0));
 
-	if(!PlyIsCop[client] && teamIndex == 2) {
-		PrintToClientEx(client, "You cannot change to cop if you are not cop.");
+	if(!PlyIsCop[player] && teamIndex == 2) {
+		PrintToClientEx(player, "You cannot change to cop if you are not cop.");
 		return Plugin_Handled;
 	}
 
@@ -389,13 +387,14 @@ public void Use_ProcessDoorFunc(int client) {
 	if(IsValidDoor(entClassname)) {
 		int distance = FloatToInt(GetEntityDistance(client, entity));
 		if(distance <= 80) {
-			if(GetUserAdmin(client) != INVALID_ADMIN_ID) {
+			if(GetUserAdmin(client) != INVALID_ADMIN_ID || PlyIsCop[client]) {
 				AcceptEntityInput(entity, "Toggle");
 			}
 		}
 	}
 }
 
+static float[MAXPLAYERS + 1] shiftButtonDelay = 0.0;
 public void Shift_ProcessDoorFunc(int client) {
 	int entity = GetClientAimTarget(client, false);
 	if(entity == -1 || entity == -2) return;
@@ -407,18 +406,18 @@ public void Shift_ProcessDoorFunc(int client) {
 	if(!result) return;
 	if(IsValidDoor(entClassname)) {
 		int distance = FloatToInt(GetEntityDistance(client, entity));
-		if(distance <= 80) {
+		if(distance <= 80 && GetGameTime() > shiftButtonDelay[client]) {
 			if(HasUserGotDoor(client, entity)) {
-				if(PlyDoorLocked[client][entity]) {
-					AcceptEntityInput(entity, "Unlock");
-					PlyDoorLocked[client][entity] = false;
-					PrintToClientEx(client, "Unlocked door");
+				PrintToClientEx(client, "Trying to lock/unlock");
+				if(GetEntProp(entity, Prop_Data, "m_bLocked") == false) {
+					AcceptEntityInput(entity, "Lock");
+					PrintToClientEx(client, "You locked your door.");
 				}
 				else {
-					AcceptEntityInput(entity, "Lock");
-					PlyDoorLocked[client][entity] = true;
-					PrintToClientEx(client, "Locked door");
+					AcceptEntityInput(entity, "Unlock");
+					PrintToClientEx(client, "You unlocked your door.");
 				}
+				shiftButtonDelay[client] = GetGameTime() + 2.0;
 			}
 		}
 	}
@@ -430,7 +429,7 @@ public void Use_ProcessPlayerFunc(int client) {
 
 	//TODO: Add IsFakeClient check
 	if(IsClientConnected(player) && IsClientInGame(player)) {
-		Menu_OpenPlayer(client);
+		//Menu_OpenPlayer(client);
 	}
 }
 
@@ -483,6 +482,15 @@ public Action Timer_CalculateUptime(Handle timer) {
 
 public Action Timer_CalculateSalary(Handle timer, any client) {
 	if(PlySalaryCount[client] <= 0) {
+		if(PlyNextRaise[client] == 0) {
+			PlyNextRaise[client] = (60 * PlySalary[client]);
+			PlySalary[client]++;
+			PrintToClientEx(client, "Congratulations! You've received a payrise of {green}$%i{default}", PlySalary[client]);
+		}
+		else {
+			PlyNextRaise[client]--;
+		}
+
 		PlySalaryCount[client] = 60;
 		PlyBank[client] += PlySalary[client];
 		SQL_Save(client);
@@ -522,8 +530,8 @@ public Action Timer_ProcessHud(Handle timer, any client) {
 			isCop = "No";
 		}
 
-		Format(hudText, sizeof(hudText), "Wallet: $%s\nBank: $%s\nDebt: $%s\nSalary: $%s\nNext Pay: %i %s\nKills: %s\nLevel: %i\nXP: %d/100\nIsCop: %s", 
-			reWallet, reBank, reDebt, reSalary, PlySalaryCount[client], goodGrammar, reKills, PlyLevel[client], PlyXP[client], isCop);
+		Format(hudText, sizeof(hudText), "Wallet: $%s\nBank: $%s\nDebt: $%s\nSalary: $%s\nNext Pay: %i %s\nKills: %s\nLevel: %i\nXP: %d/100\nNext Raise: %i Minutes", 
+			reWallet, reBank, reDebt, reSalary, PlySalaryCount[client], goodGrammar, reKills, PlyLevel[client], PlyXP[client], PlyNextRaise[client]);
 		SetHudTextParams(HudPosition[0], HudPosition[1], HudPosition[2], HudColor[0], HudColor[1], HudColor[2], HudColor[3], 0, 1.0, 0.1, 0.1);
 		ShowHudText(client, -1, hudText);
 
@@ -584,7 +592,7 @@ public Action Timer_AwaitTeleport(Handle timer, any client) {
 	else {
 		TeleportEntity(client, PlayerSpawnPos, NULL_VECTOR, NULL_VECTOR);
 	}
-	return Plugin_Continue;
+	return Plugin_Handled;
 }
 
 public Action Timer_ProcessOutfit(Handle timer, any client) {
@@ -594,8 +602,8 @@ public Action Timer_ProcessOutfit(Handle timer, any client) {
 	else {
 		ProcessPlayerOutfit(client);
 	}
-	CreateTimer(0.5, Timer_AwaitTeleport, client);
-	return Plugin_Continue;
+	CreateTimer(0.1, Timer_AwaitTeleport, client);
+	return Plugin_Handled;
 }
 
 public Action Timer_ProcessLookHit(Handle timer, any client) {
@@ -615,10 +623,55 @@ public void ProcessDoor(int client) {
 
 	if(IsValidDoor(entClassname)) {
 		int distance = FloatToInt(GetEntityDistance(client, entity));
-		if(distance <= 100) {
+		if(distance <= 110) {
 			char buffer[255];
-			Format(buffer, sizeof(buffer), "Door ID: %i", entity);
-			SetHudTextParams(-1.0, -1.0, 1.0, 0, 255, 0, 255, 0, 0.0, 0.0, 0.0);
+
+			//Is for sale
+			if(DoorCanBuy[entity] == 1) {
+				Format(buffer, sizeof(buffer), "<Property #%i For Sale!>\nDoor Price: $%i", entity, DoorPrice[entity]);
+				SetHudTextParams(-1.0, -1.0, 1.0, 255, 255, 0, 255, 0, 0.0, 0.0, 0.0);
+			}
+			
+			if(DoorCanBuy[entity] == 0 && DoorIsOwned[entity] == 0) {
+				if(StrEqual(DoorNotice[entity], "", false)) {
+					Format(buffer, sizeof(buffer), "<Property #%i Not For Sale>", entity);
+					SetHudTextParams(-1.0, -1.0, 1.0, 255, 255, 0, 255, 0, 0.0, 0.0, 0.0);
+				}
+				else {
+					Format(buffer, sizeof(buffer), "<Property #%i Not For Sale>\nNotice: %s", entity, DoorNotice[entity]);
+					SetHudTextParams(-1.0, -1.0, 1.0, 255, 0, 0, 255, 0, 0.0, 0.0, 0.0);
+				}
+			}
+
+			//Is store
+			if(DoorIsStore[entity] == 1) {
+				Format(buffer, sizeof(buffer), "<Store #%i>\nSells: %s", entity, DoorNotice[entity]);
+				SetHudTextParams(-1.0, -1.0, 1.0, 0, 255, 0, 255, 0, 0.0, 0.0, 0.0);
+			}
+
+			//Is police door
+			if(DoorIsPolice[entity] == 1) {
+				if(PlyIsCop[client]) {
+					Format(buffer, sizeof(buffer), "<Police Property #%i>", entity);
+					SetHudTextParams(-1.0, -1.0, 1.0, 0, 0, 255, 255, 0, 0.0, 0.0, 0.0);
+				}
+				else {
+					Format(buffer, sizeof(buffer), "<Police Property #%i>\nNo Entry", entity);
+					SetHudTextParams(-1.0, -1.0, 1.0, 0, 0, 255, 255, 0, 0.0, 0.0, 0.0);
+				}
+			}
+
+			//Is owned
+			if(DoorIsOwned[entity]) {
+				if(HasUserGotDoor(client, entity)) {
+					Format(buffer, sizeof(buffer), "<Property #%i>\nYou own this property.", entity);
+					SetHudTextParams(-1.0, -1.0, 1.0, 255, 255, 0, 255, 0, 0.0, 0.0, 0.0);
+				}
+				else {
+					Format(buffer, sizeof(buffer), "<Property #%i>\nThis property is owned.", entity);
+					SetHudTextParams(-1.0, -1.0, 1.0, 255, 0, 0, 255, 0, 0.0, 0.0, 0.0);
+				}
+			}
 			ShowHudText(client, -1, buffer);
 		}
 	}
@@ -637,7 +690,15 @@ public void ProcessPlayer(int client) {
 			FormatNumber(PlySalary[entity], reSalary, sizeof(reSalary));
 			FormatNumber(PlyKills[entity], reKills, sizeof(reKills));
 
-			Format(buffer, sizeof(buffer), "Wallet: $%s\nSalary: $%i\nKills: %i", reWallet, reSalary, reKills);
+			if(PlyIsCop[entity] == 1 && GetUserAdmin(entity) == INVALID_ADMIN_ID) {
+				Format(buffer, sizeof(buffer), "<Cop>\nWallet: $%s\nSalary: $%s\nKills: %s", reWallet, reSalary, reKills);
+			}
+			else if(PlyIsCop[entity] == 1 && GetUserAdmin(entity) != INVALID_ADMIN_ID) {
+				Format(buffer, sizeof(buffer), "<Admin>\nPrivate Profile");
+			}
+			else {
+				Format(buffer, sizeof(buffer), "<Player>\nWallet: $%s\nSalary: $%s\nKills: %s", reWallet, reSalary, reKills);
+			}		
 			SetHudTextParams(-1.0, -1.0, 1.0, 255, 255, 0, 255, 0, 0.0, 0.0, 0.0);
 			ShowHudText(client, -1, buffer);
 		}
@@ -847,9 +908,170 @@ public Action Command_GiveDoor(int client, int args) {
 		int distance = FloatToInt(GetEntityDistance(client, entity));
 		if(distance <= 100) {
 			GetClientName(target, targetName, sizeof(targetName));
-			AddDoor(target, entity);
+			SetPlayerDoor(target, entity);
 			PrintToClientEx(client, "You've given {green}%s{default} door {fullred}%i{default}", targetName, entity);
 			PrintToClientEx(target, "You've been given access to door {green}%i{default} by {fullred}%s{default}", entity, targetName);
+		}
+	}
+	return Plugin_Handled;
+}
+
+public Action Command_SetCopDoor(int client, int args) {
+	int entity = GetClientAimTarget(client, false);
+	if(entity == -1 || entity == -2) { PrintToClientEx(client, "Entity was invalid"); return Plugin_Handled; }
+	if(!IsValidEntity(entity)) { PrintToClientEx(client, "Not a valid entity"); return Plugin_Handled; }
+
+	char entClassname[32];
+	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+	if(!result) { PrintToClientEx(client, "Failed to get classname"); return Plugin_Handled; }
+
+	if(IsValidDoor(entClassname)) {
+		int distance = FloatToInt(GetEntityDistance(client, entity));
+		if(distance <= 100) {
+			SetCopDoor(entity);
+			PrintToClientEx(client, "Door {green}#%i{default} has been set as a cop door.", entity);
+		}
+	}
+	return Plugin_Handled;
+}
+
+public Action Command_SetDoorStore(int client, int args) {
+	if(args != 1) { PrintToClientEx(client, "Command takes 1 argument (notice)"); return Plugin_Handled; }
+	char arg1[32];
+	GetCmdArg(1, arg1, sizeof(arg1));
+	int entity = GetClientAimTarget(client, false);
+	if(entity == -1 || entity == -2) { PrintToClientEx(client, "Entity was invalid"); return Plugin_Handled; }
+	if(!IsValidEntity(entity)) { PrintToClientEx(client, "Not a valid entity"); return Plugin_Handled; }
+
+	char entClassname[32];
+	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+	if(!result) { PrintToClientEx(client, "Failed to get classname"); return Plugin_Handled; }
+
+	if(IsValidDoor(entClassname)) {
+		int distance = FloatToInt(GetEntityDistance(client, entity));
+		if(distance <= 100) {
+			SetStoreDoor(entity, arg1);
+			PrintToClientEx(client, "Door {green}#%i{default} has been set as a store.", entity);
+		}
+	}
+	return Plugin_Handled;
+}
+
+public Action Command_SetDoorNotice(int client, int args) {
+	if(args != 1) { PrintToClientEx(client, "Command takes 1 argument (notice)"); return Plugin_Handled; }
+
+	char arg1[32];
+	GetCmdArg(1, arg1, sizeof(arg1));
+
+	int entity = GetClientAimTarget(client, false);
+	if(entity == -1 || entity == -2) { PrintToClientEx(client, "Entity was invalid"); return Plugin_Handled; }
+	if(!IsValidEntity(entity)) { PrintToClientEx(client, "Not a valid entity"); return Plugin_Handled; }
+
+	char entClassname[32];
+	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+	if(!result) { PrintToClientEx(client, "Failed to get classname"); return Plugin_Handled; }
+
+	if(IsValidDoor(entClassname)) {
+		int distance = FloatToInt(GetEntityDistance(client, entity));
+		if(distance <= 100) {
+			if(DoorIsPolice[entity] != 1) {
+				DoorNotice[entity] = arg1;
+				SQL_SaveDoor(entity);
+				PrintToClientEx(client, "Door {green}#%i{default} notice set to {green}%s{default}", entity, arg1);
+			}
+			else {
+				PrintToClientEx(client, "You cannot set notices for police doors.");
+			}
+		}
+	}
+	return Plugin_Handled;
+}
+
+public Action Command_SetDoorPrice(int client, int args) {
+	if(args != 1) { PrintToClientEx(client, "Command takes 1 argument (price)"); return Plugin_Handled; }
+
+	char arg1[32];
+	GetCmdArg(1, arg1, sizeof(arg1));
+
+	int entity = GetClientAimTarget(client, false);
+	if(entity == -1 || entity == -2) { PrintToClientEx(client, "Entity was invalid"); return Plugin_Handled; }
+	if(!IsValidEntity(entity)) { PrintToClientEx(client, "Not a valid entity"); return Plugin_Handled; }
+
+	char entClassname[32];
+	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+	if(!result) { PrintToClientEx(client, "Failed to get classname"); return Plugin_Handled; }
+
+	if(IsValidDoor(entClassname)) {
+		int distance = FloatToInt(GetEntityDistance(client, entity));
+		if(distance <= 100) {
+			if(DoorIsPolice[entity] != 1 && DoorIsStore[entity] != 1) {
+				char formatted[32];
+				int value = StringToInt(arg1, 10);
+				DoorPrice[entity] = value;
+				FormatNumber(value, formatted, sizeof(formatted));
+				SQL_SaveDoor(entity);
+				PrintToClientEx(client, "Changed price of door {green}#%i{default} to {green}$%s{default}", entity, formatted);
+			}
+			else {
+				PrintToClientEx(client, "You cannot set prices on police doors or store doors.");
+			}
+		}
+	}
+	return Plugin_Handled;
+}
+
+public Action Command_BuyDoor(int client, int args) {
+	int entity = GetClientAimTarget(client, false);
+	if(entity == -1 || entity == -2) { PrintToClientEx(client, "Entity was invalid"); return Plugin_Handled; }
+	if(!IsValidEntity(entity)) { PrintToClientEx(client, "Not a valid entity"); return Plugin_Handled; }
+
+	char entClassname[32];
+	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+	if(!result) { PrintToClientEx(client, "Failed to get classname"); return Plugin_Handled; }
+
+	if(IsValidDoor(entClassname)) {
+		int distance = FloatToInt(GetEntityDistance(client, entity));
+		if(distance <= 100) {
+			if(DoorIsOwned[entity] == 0 && DoorIsPolice[entity] == 0 && DoorIsStore[entity] == 0 && DoorCanBuy[entity] == 1) {
+				if(PlyWallet[client] >= DoorPrice[entity]) {
+					PlyWallet[client] -= DoorPrice[entity];
+					char amount[32];
+					FormatNumber(DoorPrice[entity], amount, sizeof(amount));
+					PrintToClientEx(client, "Congratulations! You've purchased property {green}#%i{default} for {green}$%s{default}", entity, amount);
+					SetPlayerDoor(client, entity);
+				}
+				else {
+					PrintToClientEx(client, "You cannot afford this door.");
+				}
+			}
+			else {
+				PrintToClientEx(client, "You cannot buy this door.");
+			}
+		}
+	}
+	return Plugin_Handled;
+}
+
+public Action Command_SetDoor(int client, int args) {
+	if(args != 2) { PrintToClientEx(client, "Command takes 2 arguments (notice, price)"); return Plugin_Handled; }
+	char arg1[32], arg2[32];
+
+	GetCmdArg(1, arg1, sizeof(arg1));
+	GetCmdArg(2, arg2, sizeof(arg2));
+
+	int entity = GetClientAimTarget(client, false);
+	if(entity == -1 || entity == -2) { PrintToClientEx(client, "Entity was invalid"); return Plugin_Handled; }
+	if(!IsValidEntity(entity)) { PrintToClientEx(client, "Not a valid entity"); return Plugin_Handled; }
+
+	char entClassname[32];
+	bool result = GetEntityClassname(entity, entClassname, sizeof(entClassname));
+	if(!result) { PrintToClientEx(client, "Failed to get classname"); return Plugin_Handled; }
+
+	if(IsValidDoor(entClassname)) {
+		int distance = FloatToInt(GetEntityDistance(client, entity));
+		if(distance <= 100) {
+			SetServerDoor(entity, arg1, StringToInt(arg2, 10));
+			PrintToClientEx(client, "Set door {green}#%i{default} to price {green}$%i{default} and notice {green}%s{default}", entity, StringToInt(arg2, 10), arg1);
 		}
 	}
 	return Plugin_Handled;
@@ -860,13 +1082,7 @@ public Action Command_GiveDoor(int client, int args) {
 
 
 
-
-
-
-
-//DATABASE
-//Inserts a new entry into the database
-static void SQL_InsertNew(int client) {
+static void SQL_InsertNewPlayer(int client) {
 	char query[250], playerAuth[32];
 	GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));
 	Format(query, sizeof(query), "INSERT INTO %s ('ID') VALUES ('%s')", PlayerTableName, playerAuth);
@@ -874,7 +1090,6 @@ static void SQL_InsertNew(int client) {
 	PrintToServer("[RPDM] Successfully inserted new profile: %s", playerAuth);
 }
 
-//Load player call
 static void SQL_Load(int client) {
 	char query[200], playerAuth[32];
 	GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));
@@ -889,38 +1104,104 @@ static void SQL_Save(int client) {
 
 	if(IsClientInGame(client)) {
 		GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));
-		Format(query, sizeof(query), "UPDATE %s SET Wallet = '%i', Bank = '%i', Salary = '%i', Debt = '%i', Kills = '%i', Level = '%i', IsCop = '%i', XP = '%d' WHERE ID = '%s'", PlayerTableName, PlyWallet[client], PlyBank[client], PlySalary[client], PlyDebt[client], PlyKills[client], PlyLevel[client], PlyIsCop[client], PlyXP[client], playerAuth);
-		SQL_TQuery(RPDMDatabase, SQL_SaveCallback, query);
-		PrintToServer("[RPDM] Profile %s saved.", playerAuth);
+		Format(query, sizeof(query), "UPDATE %s SET Wallet = '%i', Bank = '%i', Salary = '%i', Debt = '%i', Kills = '%i', Level = '%i', IsCop = '%i', XP = '%d', NextRaise = '%i' WHERE ID = '%s'", PlayerTableName, PlyWallet[client], PlyBank[client], PlySalary[client], PlyDebt[client], PlyKills[client], PlyLevel[client], PlyIsCop[client], PlyXP[client], PlyNextRaise[client], playerAuth);
+		SQL_TQuery(RPDMDatabase, SQL_GenericTQueryCallback, query);
 	}
 }
 
+static void SQL_LoadDoors(int entity) {
+	char query[200];
+	Format(query, sizeof(query), "SELECT * FROM %s WHERE DoorID = %i", DoorTableName, entity);
+	SQL_TQuery(RPDMDatabase, SQL_LoadDoorCallback, query, entity);
+}
+
+static void SQL_SaveDoor(int entity) {
+	char query[200];
+	Format(query, sizeof(query), "UPDATE %s SET RelationID = %i, OwnerAuthID = '%s', Notice = '%s', IsPolice = %i, IsOwned = %i, CanBuy = %i, Price = %i, IsStore = %i, OwnerName = '%s' WHERE DoorID = %i", DoorTableName, DoorRelationID[entity], DoorOwnerAuthID[entity], DoorNotice[entity], DoorIsPolice[entity], DoorIsOwned[entity], DoorCanBuy[entity], DoorPrice[entity], DoorIsStore[entity], DoorOwnerName[entity], entity);
+	SQL_TQuery(RPDMDatabase, SQL_SaveDoorCallback, query, entity);
+}
+
+
 //Inital database call
 static void SQL_Initialise() {
-	char error[200];
-	RPDMDatabase = SQLite_UseDatabase(DatabaseName, error, sizeof(error));
+	char error[200], mapName[32], name[255];
+	GetCurrentMap(mapName, sizeof(mapName));
+	Format(name, sizeof(name), "%s-%s", DatabaseName, mapName);
+
+	RPDMDatabase = SQLite_UseDatabase(name, error, sizeof(error));
 	if(RPDMDatabase == null) {
 		PrintToServer("[RPDM] Error at SQL_Initialise: %s", error);
 		LogError("[RPDM] Error at SQL_Initialise: %s", error);
 	}
 	else {
-		SQL_CreateDatabase();
+		SQL_CreatePlayerTable();
+		SQL_CreateDoorTable();
 	}
 }
 
 //Creates or loads database
-static Action SQL_CreateDatabase() {
+static Action SQL_CreatePlayerTable() {
 	char query[600];
-	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('ID' VARCHAR(32), Wallet INT(9) NOT NULL DEFAULT 0,Bank INT(9) NOT NULL DEFAULT 100,Salary INT(9) NOT NULL DEFAULT 1,Debt INT(9) NOT NULL DEFAULT 0,Kills INT(9) NOT NULL DEFAULT 0,Level INT(9) NOT NULL DEFAULT 1, IsCop INT(9) NOT NULL DEFAULT 0, XP DECIMAL(10,5) NOT NULL DEFAULT 0)", PlayerTableName);
-	SQL_TQuery(RPDMDatabase, SQL_CreateCallback, query);
+	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('ID' VARCHAR(32), Wallet INT(9) NOT NULL DEFAULT 0,Bank INT(9) NOT NULL DEFAULT 100,Salary INT(9) NOT NULL DEFAULT 1,Debt INT(9) NOT NULL DEFAULT 0,Kills INT(9) NOT NULL DEFAULT 0,Level INT(9) NOT NULL DEFAULT 1, IsCop INT(9) NOT NULL DEFAULT 0, XP DECIMAL(10,5) NOT NULL DEFAULT 0, NextRaise INT(9) NOT NULL DEFAULT 60)", PlayerTableName);
+	SQL_TQuery(RPDMDatabase, SQL_GenericTQueryCallback, query);
 	return Plugin_Handled;
+}
+
+//Creates or loads database
+static Action SQL_CreateDoorTable() {
+	char query[600];
+	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('DoorID' INT(9), RelationID INT(9) DEFAULT 0, OwnerAuthID VARCHAR(32), Notice VARCHAR(32), IsPolice INT(9) DEFAULT 0, IsOwned INT(9) DEFAULT 0, CanBuy INT(9) DEFAULT 0, Price INT(9) DEFAULT 0, IsStore INT(9) DEFAULT 0, OwnerName VARCHAR(32))", DoorTableName);
+	SQL_TQuery(RPDMDatabase, SQL_GenericTQueryCallback, query);
+	return Plugin_Handled;
+}
+
+static void SQL_InsertNewDoor(int entity) {
+	char query[250];
+	Format(query, sizeof(query), "INSERT INTO %s ('DoorID') VALUES ('%i')", DoorTableName, entity);
+	SQL_TQuery(RPDMDatabase, SQL_InsertDoorCallback, query, entity);
+	PrintToServer("[RPDM] Successfully inserted new door: %i", entity);
+}
+
+//Load door callback function
+static void SQL_LoadDoorCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(hndl != null) {
+		if(!SQL_GetRowCount(hndl)) {
+			SQL_InsertNewDoor(data);
+		}
+		else {
+			DoorRelationID[data] = SQL_FetchInt(hndl, 1);
+			SQL_FetchString(hndl, 2, DoorOwnerAuthID[data], 32);
+			SQL_FetchString(hndl, 3, DoorNotice[data], 255);
+			DoorIsPolice[data] = SQL_FetchInt(hndl, 4);
+			DoorIsOwned[data] = SQL_FetchInt(hndl, 5);
+			DoorCanBuy[data] = SQL_FetchInt(hndl, 6);
+			DoorPrice[data] = SQL_FetchInt(hndl, 7);
+			DoorIsStore[data] = SQL_FetchInt(hndl, 8);
+			SQL_FetchString(hndl, 9, DoorOwnerName[data], 32);
+		}
+	}
+	else {
+		PrintToServer("[RPDM] Found error on SQL_LoadDoorCallback: %s", error);
+		LogError("[RPDM] Found error on SQL_LoadDoorCallback: %s", error);
+		return;
+	}
+}
+
+static void SQL_SaveDoorCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(hndl != null) {
+		SQL_LoadDoors(data);
+	}
+	else {
+		PrintToServer("[RPDM] Found error on SQL_SaveDoorCallback: %s", error);
+		LogError("[RPDM] Found error on SQL_SaveDoorCallback: %s", error);
+	}
 }
 
 //Load callback function
 static void SQL_LoadCallback(Handle owner, Handle hndl, const char[] error, any data) {
 	if(hndl != null) {
 		if(!SQL_GetRowCount(hndl)) {
-			SQL_InsertNew(data);
+			SQL_InsertNewPlayer(data);
 		}
 		else {
 			PlyWallet[data] = SQL_FetchInt(hndl, 1);
@@ -931,6 +1212,7 @@ static void SQL_LoadCallback(Handle owner, Handle hndl, const char[] error, any 
 			PlyLevel[data] = SQL_FetchInt(hndl, 6);
 			PlyIsCop[data] = SQL_FetchInt(hndl, 7);
 			PlyXP[data] = SQL_FetchFloat(hndl, 8);
+			PlyNextRaise[data] = SQL_FetchInt(hndl, 9);
 
 			//Timers
 			PlySalaryTimer[data] = CreateTimer(1.0, Timer_CalculateSalary, data, TIMER_REPEAT);
@@ -956,28 +1238,33 @@ static void SQL_InsertCallback(Handle owner, Handle hndl, const char[] error, an
 	}
 }
 
-//Save callback function
-static void SQL_SaveCallback(Handle owner, Handle hndl, const char[] error, any data) {
-	if(hndl == null) {
-		PrintToServer("[RPDM] Error at SQL_SaveCallback: %s", error);
-		LogError("[RPDM] Error at SQL_SaveCallback: %s", error);
-	}
-}
-
-//Create callback function
-static void SQL_CreateCallback(Handle owner, Handle hndl, const char[] error, any data) {
+//Insert Door callback
+static void SQL_InsertDoorCallback(Handle owner, Handle hndl, const char[] error, any data) {
 	if(hndl != null) {
-		PrintToServer("[RPDM] Successfully loaded / created database.");
-		LogError("[RPDM] Successfully loaded / created database.");
+		SQL_LoadDoors(data);
 	}
 	else {
-		PrintToServer("[RPDM] Error at SQL_CreateCallback: %s", error);
-		LogError("[RPDM] Error at SQL_CreateCallback: %s", error);
+		PrintToServer("[RPDM] Error at SQL_InsertCallback: %s", error);
+		LogError("[RPDM] Error at SQL_InsertCallback: %s", error);
+	}
+}
+
+//Creating door database callback
+static void SQL_GenericTQueryCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(hndl == null) {
+		PrintToServer("[RPDM] Error at SQL_GenericTQueryCallback: %s", error);
+		LogError("[RPDM] Error at SQL_GenericTQueryCallback: %s", error);
 	}
 }
 
 
+//===FILES===
+public void File_SetPlayerSpawn(float pos[3]) {
+	static Handle keyStore
 
+
+
+}
 
 
 
@@ -1029,20 +1316,66 @@ public int FloatToInt(float value) {
 }
 
 public bool HasUserGotDoor(int client, int entity) {
+	char authID[32];
 	bool retVal = false;
-	if(PlyDoorsOwned[client][entity] != 0) {
+
+	GetClientAuthId(client, AuthId_Steam3, authID, sizeof(authID));
+	if(StrEqual(DoorOwnerAuthID[entity], authID, false)) {
 		retVal = true;
 	}
 	return retVal;
 }
 
-public void AddDoor(int client, int entity) {
-	PlyDoorsOwned[client][entity] = entity;
-	PlyDoorLocked[client][entity] = false;
+public void SetServerDoor(int entity, char notice[32], int price) {
+	DoorIsOwned[entity] = 0;
+	DoorOwnerAuthID[entity] = "";
+	DoorCanBuy[entity] = 1;
+	DoorIsStore[entity] = 0;
+	DoorIsPolice[entity] = 0;
+	DoorPrice[entity] = price;
+	DoorNotice[entity] = notice;
+	DoorOwnerName[entity] = "SERVER";
+	SQL_SaveDoor(entity);
+}
 
-	//Make sure door is open and unlocked
-	AcceptEntityInput(entity, "Unlock");
-	AcceptEntityInput(entity, "Toggle");
+public void SetPlayerDoor(int client, int entity) {
+	char auth[32], notice[255], name[32];
+	GetClientName(client, name, sizeof(name));
+	GetClientAuthId(client, AuthId_Steam3, auth, sizeof(auth));
+	Format(notice, sizeof(notice), "Owned by %s", name);
+
+	DoorIsOwned[entity] = 1;
+	DoorOwnerAuthID[entity] = auth;
+	DoorCanBuy[entity] = 0;
+	DoorIsStore[entity] = 0;
+	DoorIsPolice[entity] = 0;
+	DoorNotice[entity] = notice;
+	DoorOwnerName[entity] = name;
+	SQL_SaveDoor(entity);
+}
+
+public void SetCopDoor(int entity) {
+	DoorIsOwned[entity] = 0;
+	DoorOwnerAuthID[entity] = "";
+	DoorCanBuy[entity] = 0;
+	DoorNotice[entity] = "";
+	DoorPrice[entity] = 0;
+	DoorOwnerName[entity] = "SERVER";
+	DoorIsStore[entity] = 0;
+	DoorIsPolice[entity] = 1;
+	SQL_SaveDoor(entity);
+}
+
+public void SetStoreDoor(int entity, char notice[32]) {
+	DoorIsOwned[entity] = 0;
+	DoorOwnerAuthID[entity] = "";
+	DoorCanBuy[entity] = 0;
+	DoorNotice[entity] = notice;
+	DoorPrice[entity] = 0;
+	DoorOwnerName[entity] = "SERVER";
+	DoorIsStore[entity] = 1;
+	DoorIsPolice[entity] = 0;
+	SQL_SaveDoor(entity);
 }
 
 public bool IsValidDoor(char entClassname[32]) {
@@ -1051,6 +1384,11 @@ public bool IsValidDoor(char entClassname[32]) {
 		retVal = true;
 	}
 	return retVal;
+}
+
+public void IntToStringBool(int num, char retVal[32], int size) {
+	if(num == 1) retVal = "True";
+	if(num == 0) retVal = "False";
 }
 
 public void FormatNumber(int Number, char Output[32], int MaxLen) {
