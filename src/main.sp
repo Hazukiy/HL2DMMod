@@ -5,15 +5,16 @@
 #pragma semicolon 1
 #pragma newdecls required
 
-//Server/Plugin related globals
-//TODO: Make these disgusting hardcoded values configurable in a .cfg
+//Database & table names
 char DatabaseName[] = "Roleplay";
 char PlayerTableName[] = "Players";
 char DoorTableName[] = "Doors";
-char SpawnPath[];
+char PlayerSpawnTableName[] = "Spawns";
+
 static Handle RPDMDatabase;
-static float[] PlayerSpawnPos = {-1015474985, -1007978495, 1143341568};
-static float[] CopSpawnPos = {1157682742, 1149416807, 1147666944};
+static float[10][3] PlayerSpawn;
+static float[10][3] CopSpawn;
+
 static char PlayerModels[][50] = {
 "models/humans/group01/female_01.mdl",
 "models/humans/group01/female_02.mdl",
@@ -37,7 +38,7 @@ char AdvertArr[] = {
 	"Type {green}!cmds{default} or {green}/cmds{default} for a list of commands.", 
 	"Your salary increases every minute.", 
 	"You can buy a door by looking at it and typing {green}!buydoor{default}" };
-char CmdArr[][20] = { "sm_uptime", "sm_cmds", "sm_buydoor" };
+char CmdArr[][20] = { "sm_uptime", "sm_cmds", "sm_buydoor", "sm_bet" };
 float[] HudPosition = {0.015, -0.50, 1.0}; //X,Y,Holdtime
 int HudColor[4] = {72, 117, 212, 255}; //RGBA 
 int TotalUptime;
@@ -77,9 +78,9 @@ int DoorIsStore[4096];
 char DoorOwnerName[4096][32];
 
 public Plugin myinfo = {
-	name        = "RP-DM Mod",
+	name        = "Business Tycoon RP",
 	author      = "SirTiggs",
-	description = "A mod that combines DM & RP in one.",
+	description = "A plugin that allows players to build up their businesses.",
 	version     = PLUGIN_VERSION,
 	url         = "N/A"
 };
@@ -106,6 +107,9 @@ public void OnPluginStart() {
 	RegAdminCmd("sm_setstore", Command_SetDoorStore, ADMFLAG_ROOT, "Sets a door as a store.");
 	RegAdminCmd("sm_setprice", Command_SetDoorPrice, ADMFLAG_ROOT, "Sets the price of a door.");
 	RegAdminCmd("sm_setdoor", Command_SetDoor, ADMFLAG_ROOT, "Sets the door as buyable");
+	RegAdminCmd("sm_setspawn", Command_SetSpawn, ADMFLAG_ROOT, "Sets a spawnpoint.");
+	RegAdminCmd("sm_removespawn", Command_RemovePlayerSpawn, ADMFLAG_ROOT, "Removes a spawn with a given ID.");
+	RegAdminCmd("sm_printplayerspawns", Command_PrintPlayerSpawns, ADMFLAG_ROOT, "Prints out all player spawns.");
 
 	//Register forwards
 	HookEvent("player_connect_client", Event_PlayerConnectClient, EventHookMode_Pre);
@@ -158,13 +162,6 @@ public void OnMapStart() {
 			}
 		}
 	}
-
-	char mapName[50];
-	GetCurrentMap(mapName, sizeof(mapName));
-
-	//Load file system
-	BuildPath(Path_SM, SpawnPath, 256, "data/roleplay/" + mapName + "player_spawns.txt");
-	if(!FileExists(SpawnPath)) PrintToServer("[RPDM] - Warning, cannot find path " + SpawnPath);
 }
 
 //Use this to setup timers ect
@@ -409,7 +406,7 @@ public void Shift_ProcessDoorFunc(int client) {
 		if(distance <= 80 && GetGameTime() > shiftButtonDelay[client]) {
 			if(HasUserGotDoor(client, entity)) {
 				PrintToClientEx(client, "Trying to lock/unlock");
-				if(GetEntProp(entity, Prop_Data, "m_bLocked") == false) {
+				if(GetEntProp(entity, Prop_Data, "m_bLocked") == 0) {
 					AcceptEntityInput(entity, "Lock");
 					PrintToClientEx(client, "You locked your door.");
 				}
@@ -587,10 +584,21 @@ public Action Timer_GiveWeapons(Handle timer, any client) {
 
 public Action Timer_AwaitTeleport(Handle timer, any client) {
 	if(PlyIsCop[client] == 1) {
-		TeleportEntity(client, CopSpawnPos, NULL_VECTOR, NULL_VECTOR);
+		//TODO: Add logic
 	}
 	else {
-		TeleportEntity(client, PlayerSpawnPos, NULL_VECTOR, NULL_VECTOR);
+		if(IsPlayerSpawnSet()) {
+			float vec[3];
+			vec = FindValidRndPlySpawn();
+			TeleportEntity(client, vec, NULL_VECTOR, NULL_VECTOR);
+
+			char q[32];
+			Format(q, sizeof(q), "Trying to spawn you at ID: (0) X: %d, Y: %d, Z: %d", vec[0], vec[1], vec[2]);
+			PrintToClientEx(client, q);
+		}
+		else {
+			PrintToClientEx(client, "Player spawn has not been set yet. Using default map spawn.");
+		}
 	}
 	return Plugin_Handled;
 }
@@ -747,7 +755,7 @@ public Action Command_GetUptime(int client, int args) {
 
 public Action Command_GetCommands(int client, int args) {
 	PrintToClientEx(client, "See console {grey}(` button by default){default} for command list.");
-	for(int i = 0; i < sizeof(CmdArr); i++)  {
+	for(int i = 0; i <= sizeof(CmdArr); i++)  {
 		if(i == 0) PrintToConsole(client, "===COMMAND LIST===");
 		PrintToConsole(client, "%i. %s", i, CmdArr[i]);
 	}
@@ -758,6 +766,38 @@ public Action Command_GetPlayerCords(int client, int args) {
 	float pos[3];
 	GetClientAbsOrigin(client, pos);
 	PrintToClientEx(client, "Cords: X:{green}%d{default} Y:{green}%d{default} Z:{green}%d{default}", pos[0], pos[1], pos[2]);
+	return Plugin_Handled;
+}
+
+public Action Command_SetSpawn(int client, int args) {
+	char arg[10];
+	float pos[3];
+
+	GetCmdArg(1, arg, sizeof(arg));
+	GetClientAbsOrigin(client, pos);
+	SQL_AddSpawn(pos, arg);
+	PrintToClientEx(client, "Set new spawn with cords: X:{green}%d{default} Y:{green}%d{default} Z:{green}%d{default}", pos[0], pos[1], pos[2]);
+	return Plugin_Handled;
+}
+
+public Action Command_RemovePlayerSpawn(int client, int args) {
+	char arg[10];
+	GetCmdArg(1, arg, sizeof(arg));
+	int id = StringToInt(arg, 10);
+	SQL_RemoveSpawn(id);
+
+	PlayerSpawn[id][0] = 0.0;
+	PlayerSpawn[id][1] = 0.0;
+	PlayerSpawn[id][2] = 0.0;
+
+	PrintToClientEx(client, "Removed player spawn with ID: {green}%d{default}", id);
+	return Plugin_Handled;
+}
+
+public Action Command_PrintPlayerSpawns(int client, int args) {
+	for(int i = 1; i < 10; i++) {
+		PrintToConsole(client, "%i. X: %d Y: %d Z: %d", i, PlayerSpawn[i][0], PlayerSpawn[i][1], PlayerSpawn[i][2]);
+	}
 	return Plugin_Handled;
 }
 
@@ -1090,6 +1130,12 @@ static void SQL_InsertNewPlayer(int client) {
 	PrintToServer("[RPDM] Successfully inserted new profile: %s", playerAuth);
 }
 
+static void SQL_InsertNewDoor(int entity) {
+	char query[250];
+	Format(query, sizeof(query), "INSERT INTO %s ('DoorID') VALUES ('%i')", DoorTableName, entity);
+	SQL_TQuery(RPDMDatabase, SQL_InsertDoorCallback, query, entity);
+}
+
 static void SQL_Load(int client) {
 	char query[200], playerAuth[32];
 	GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));
@@ -1121,6 +1167,37 @@ static void SQL_SaveDoor(int entity) {
 	SQL_TQuery(RPDMDatabase, SQL_SaveDoorCallback, query, entity);
 }
 
+//Add a spawnpoint to the database
+static void SQL_AddSpawn(float vec[3], char isCop[10]) {
+	char query[200], xCord[32], yCord[32], zCord[32];
+
+	FloatToString(vec[0], xCord, sizeof(xCord));
+	FloatToString(vec[1], yCord, sizeof(yCord));
+	FloatToString(vec[2], zCord, sizeof(zCord));
+
+	Format(query, sizeof(query), "INSERT INTO %s (XCord, YCord, ZCord, IsCopSpawn) VALUES ('%s', '%s', '%s', '%s')", PlayerSpawnTableName, xCord, yCord, zCord, isCop);
+	SQL_TQuery(RPDMDatabase, SQL_AddSpawnCallback, query);
+}
+
+//Remove a spawnpoint to the database
+static void SQL_RemoveSpawn(int id) {
+	char query[200];
+	Format(query, sizeof(query), "DELETE FROM %s WHERE SpawnID = '%i'", PlayerSpawnTableName, id);
+	SQL_TQuery(RPDMDatabase, SQL_RemoveSpawnCallback, query);
+}
+
+static void SQL_LoadSpawns() {
+	char query[200];
+	DBResultSet rowCount = SQL_Query(RPDMDatabase, "SELECT COUNT(*) FROM Spawns WHERE SpawnID > 0 GROUP BY SpawnID");
+	int amount = rowCount.RowCount;
+
+	if(amount > 0 && amount != 0) {
+		for(int i = 1; i <= amount; i++) {
+			Format(query, sizeof(query), "SELECT * FROM %s WHERE SpawnID = '%i'", PlayerSpawnTableName, i);
+			SQL_TQuery(RPDMDatabase, SQL_LoadSpawnCallback, query, i);
+		}
+	}
+}
 
 //Inital database call
 static void SQL_Initialise() {
@@ -1136,6 +1213,7 @@ static void SQL_Initialise() {
 	else {
 		SQL_CreatePlayerTable();
 		SQL_CreateDoorTable();
+		SQL_CreateSpawnTable();
 	}
 }
 
@@ -1147,7 +1225,6 @@ static Action SQL_CreatePlayerTable() {
 	return Plugin_Handled;
 }
 
-//Creates or loads database
 static Action SQL_CreateDoorTable() {
 	char query[600];
 	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('DoorID' INT(9), RelationID INT(9) DEFAULT 0, OwnerAuthID VARCHAR(32), Notice VARCHAR(32), IsPolice INT(9) DEFAULT 0, IsOwned INT(9) DEFAULT 0, CanBuy INT(9) DEFAULT 0, Price INT(9) DEFAULT 0, IsStore INT(9) DEFAULT 0, OwnerName VARCHAR(32))", DoorTableName);
@@ -1155,14 +1232,63 @@ static Action SQL_CreateDoorTable() {
 	return Plugin_Handled;
 }
 
-static void SQL_InsertNewDoor(int entity) {
-	char query[250];
-	Format(query, sizeof(query), "INSERT INTO %s ('DoorID') VALUES ('%i')", DoorTableName, entity);
-	SQL_TQuery(RPDMDatabase, SQL_InsertDoorCallback, query, entity);
-	PrintToServer("[RPDM] Successfully inserted new door: %i", entity);
+static Action SQL_CreateSpawnTable() {
+	char query[600];
+	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('SpawnID' INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT, XCord VARCHAR(32), YCord VARCHAR(32), ZCord VARCHAR(32), IsCopSpawn VARCHAR(32))", PlayerSpawnTableName);
+	SQL_TQuery(RPDMDatabase, SQL_CreateSpawnTableCallback, query);
+	return Plugin_Handled;
 }
 
-//Load door callback function
+static void SQL_CreateSpawnTableCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(hndl != null) {
+		if(!SQL_GetRowCount(hndl)) {
+			PrintToServer("[RPDM] - No spawn points set.");
+		}
+		else {
+			PrintToServer("[RPDM] - Loading spawn points");
+			SQL_LoadSpawns();
+		}
+	}
+	else {
+		PrintToServer("[RPDM] Found error on SQL_CreateSpawnTableCallback: %s", error);
+		LogError("[RPDM] Found error on SQL_CreateSpawnTableCallback: %s", error);
+		return;
+	}
+}
+
+static void SQL_LoadSpawnCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(hndl != null) {
+		char xCord[10], yCord[10], zCord[10], isCop[10];
+		float vec[3];
+
+		SQL_FetchString(hndl, 1, xCord, sizeof(xCord));
+		SQL_FetchString(hndl, 2, yCord, sizeof(yCord));
+		SQL_FetchString(hndl, 3, zCord, sizeof(zCord));
+		SQL_FetchString(hndl, 4, isCop, sizeof(isCop));
+
+		vec[0] = StringToFloat(xCord);
+		vec[1] = StringToFloat(yCord);
+		vec[2] = StringToFloat(zCord);
+
+		if(StrEqual(isCop, "true", false)) {
+			CopSpawn[data][0] = vec[0];
+			CopSpawn[data][1] = vec[1];
+			CopSpawn[data][2] = vec[2];
+		}
+		else if(StrEqual(isCop, "false", false)) {
+			PlayerSpawn[data][0] = vec[0];
+			PlayerSpawn[data][1] = vec[1];
+			PlayerSpawn[data][2] = vec[2];
+		}
+		PrintToServer("[RPDM] - Loaded Spawn With Data ID: %i", data);
+	}
+	else {
+		PrintToServer("[RPDM] Found error on SQL_LoadSpawnCallback: %s", error);
+		LogError("[RPDM] Found error on SQL_LoadSpawnCallback: %s", error);
+		return;
+	}
+}
+
 static void SQL_LoadDoorCallback(Handle owner, Handle hndl, const char[] error, any data) {
 	if(hndl != null) {
 		if(!SQL_GetRowCount(hndl)) {
@@ -1249,6 +1375,30 @@ static void SQL_InsertDoorCallback(Handle owner, Handle hndl, const char[] error
 	}
 }
 
+//Add callback
+static void SQL_AddSpawnCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(hndl != null) {
+		PrintToServer("Successfully added new spawn.");
+		SQL_LoadSpawns();	
+	}
+	else {
+		PrintToServer("[RPDM] Error at SQL_AddSpawnCallback: %s", error);
+		LogError("[RPDM] Error at SQL_AddSpawnCallback: %s", error);
+	}
+}
+
+//Remove callback
+static void SQL_RemoveSpawnCallback(Handle owner, Handle hndl, const char[] error, any data) {
+	if(hndl != null) {
+
+		PrintToServer("Successfully removed spawn with id %i", data);	
+	}
+	else {
+		PrintToServer("[RPDM] Error at SQL_RemoveSpawnCallback: %s", error);
+		LogError("[RPDM] Error at SQL_RemoveSpawnCallback: %s", error);
+	}
+}
+
 //Creating door database callback
 static void SQL_GenericTQueryCallback(Handle owner, Handle hndl, const char[] error, any data) {
 	if(hndl == null) {
@@ -1256,16 +1406,6 @@ static void SQL_GenericTQueryCallback(Handle owner, Handle hndl, const char[] er
 		LogError("[RPDM] Error at SQL_GenericTQueryCallback: %s", error);
 	}
 }
-
-
-//===FILES===
-public void File_SetPlayerSpawn(float pos[3]) {
-	static Handle keyStore
-
-
-
-}
-
 
 
 
@@ -1385,6 +1525,43 @@ public bool IsValidDoor(char entClassname[32]) {
 	}
 	return retVal;
 }
+
+public bool IsCopSpawnSet() {
+	bool retVal = false;
+	for(int i = 0; i < sizeof(CopSpawn); i++) {
+		if(CopSpawn[i][0] != 0 && CopSpawn[i][1] != 0 && CopSpawn[i][2] != 0) {
+			retVal = true;
+			break;
+		}
+	}
+	return retVal;
+}
+
+public bool IsPlayerSpawnSet() {
+	bool retVal = false;
+	for(int i = 0; i < sizeof(PlayerSpawn); i++) {
+		if(FloatAbs(PlayerSpawn[i][0]) != 0 && FloatAbs(PlayerSpawn[i][1]) != 0 && FloatAbs(PlayerSpawn[i][2]) != 0) {
+			retVal = true;
+			break;
+		}
+	}
+	return retVal;
+}
+
+//Recursive
+static float FindValidRndPlySpawn() {
+	float vec[3];
+	int rndIndex = GetRandomInt(1, sizeof(PlayerSpawn));
+	if(FloatAbs(PlayerSpawn[rndIndex][0]) != 0 && FloatAbs(PlayerSpawn[rndIndex][1]) != 0 && FloatAbs(PlayerSpawn[rndIndex][2]) != 0) {
+		vec[0] = PlayerSpawn[rndIndex][0];
+		vec[1] = PlayerSpawn[rndIndex][1];
+		vec[2] = PlayerSpawn[rndIndex][2];
+	}
+	else {
+		FindValidRndPlySpawn();
+	}
+	return vec;
+} 
 
 public void IntToStringBool(int num, char retVal[32], int size) {
 	if(num == 1) retVal = "True";
