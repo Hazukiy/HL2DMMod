@@ -6,21 +6,28 @@
 #pragma newdecls required
 
 //PLUGIN INFO
-static char PLUGIN_NAME[] = "KillboxDM";
+static char PLUGIN_NAME[] = "RPDM";
 static char PLUGIN_DESC[] = "Enchances base gameplay of HL2DM.";
 static char PLUGIN_VERSION[] = "1.0.0";
-static char PLUGIN_PREFIX[] = "[KillboxDM]";
+static char PLUGIN_PREFIX[] = "[RPDM]";
 
 //DATABASE
 static Handle DMDatabase;
-static char DatabaseName[] = "KillboxDM";
+static char DatabaseName[] = "RPDM";
 static char Table_Player[] = "Players";
+
+//DATABASE QUERIES
+static char Query_LoadPly[] = "SELECT * FROM `%s` WHERE `ID` = '%s'";
+static char Query_SavePly[] = "UPDATE %s SET Money = %i, Kills = %i, Deaths = %i, Level = %i, XP = %i, Bounty = %i WHERE ID = '%s'";
+static char Query_InsertPly[] = "INSERT INTO %s ('ID') VALUES ('%s')";
+
+
 //SERVER
 static bool IsMapRunning = false;
 static char CommandList[][255] = {
-	"sm_uptime",
-	"sm_bet",
-	"sm_played"
+	"sm_uptime <no args> (Returns the uptime of the server)",
+	"sm_bet <amount> <red/black> (Bet an amount on black or red and win double back.)",
+	"sm_cmds <no args> (Returns a list of commands.)"
 };
 static char PlayerModels[][255] = {
 	"models/player/alyx.mdl",
@@ -42,7 +49,7 @@ static Handle UptimeTimer;
 
 //GLOBAL HUD SETTINGS
 static float[] HudPos = {0.015, -0.50, 1.0};
-static int DefaultHudColor[4] = {72, 117, 212, 255};
+static int DefaultHudColor[4] = {253, 82, 2, 255};
 
 //PLAYER
 int PlyMoney[MAXPLAYERS + 1];
@@ -65,6 +72,7 @@ public void OnPluginStart() {
 	//Player commands
 	RegConsoleCmd("sm_uptime", Command_GetUptime, "Returns the uptime of the server.");
 	RegConsoleCmd("sm_cmds", Command_GetCommands, "Returns a list of commands.");
+	RegConsoleCmd("sm_bet", Command_Bet, "Player performs betting.");
 
 	//Debug commands
 	RegAdminCmd("sm_reload", Command_ReloadServer, ADMFLAG_ROOT, "DEBUG: Reloads server on current map.");
@@ -81,7 +89,7 @@ public void OnPluginStart() {
 	HookEvent("player_connect_client", Event_PlayerConnectClient, EventHookMode_Pre);
 	HookEvent("player_connect", Event_PlayerConnect, EventHookMode_Pre);
 	HookEvent("player_disconnect", Event_PlayerDisconnect, EventHookMode_Pre);
-	HookEvent("player_death", Event_PlayerDeath, EventHookMode_Pre);
+	HookEvent("player_death", Event_PlayerDeath, EventHookMode_Post);
 	HookEvent("player_activate", Event_PlayerActivate, EventHookMode_Pre);
 	HookEvent("player_team", Event_PlayerTeam, EventHookMode_Pre);
 	HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_Pre);
@@ -131,7 +139,7 @@ public void OnClientDisconnect(int client) {
 //Gametype info changer
 public Action OnGetGameDescription(char gameDesc[64]) {
 	if(IsMapRunning) {
-		gameDesc = "KillboxDM";
+		gameDesc = "RPDM";
 		return Plugin_Changed;
 	}
 	return Plugin_Continue;
@@ -142,7 +150,7 @@ public Action Event_PlayerConnect(Event event, const char[] name, bool dontBroad
 	char playerName[32], networkID[32];
 	event.GetString("name", playerName, sizeof(playerName));
 	event.GetString("networkid", networkID, sizeof(networkID));
-	PrintToAllClients("{green}%s{default} (%s) has connected.", playerName, networkID);
+	PrintToAllClients("{green}%s{default} %s has connected.", playerName, networkID);
 	event.BroadcastDisabled = true;
 	dontBroadcast = true;
 	return Plugin_Continue;
@@ -154,9 +162,9 @@ public Action Event_PlayerDisconnect(Event event, const char[] name, bool dontBr
 	event.GetString("reason", reason, sizeof(reason));
 	event.GetString("networkID", networkID, sizeof(networkID));
 
-	PrintToAllClients("{green}%s{default} (%s) has disconnected. Reason: ({fullred}%s{default})", playerName, networkID, reason);
-	PrintToServer("%s - Client disconnected: [%s] reason: %s", PLUGIN_PREFIX, networkID, reason);
-	LogMessage("%s - Client disconnected: [%s] reason: %s", PLUGIN_PREFIX, networkID, reason);
+	PrintToAllClients("{green}%s{default} %s has disconnected. Reason: ({fullred}%s{default})", playerName, networkID, reason);
+	PrintToServer("%s - Client disconnected: %s reason: %s", PLUGIN_PREFIX, networkID, reason);
+	LogMessage("%s - Client disconnected: %s reason: %s", PLUGIN_PREFIX, networkID, reason);
 
 	event.BroadcastDisabled = true;
 	dontBroadcast = true;
@@ -164,6 +172,37 @@ public Action Event_PlayerDisconnect(Event event, const char[] name, bool dontBr
 }
 
 public Action Event_PlayerDeath(Event event, const char[] name, bool dontBroadcast) {
+	char victimName[32], attackerName[32];
+
+	//Get ids
+	int victim = GetClientOfUserId(event.GetInt("userid", 0));
+	int attacker = GetClientOfUserId(event.GetInt("attacker", 0));
+
+	//Get names
+	GetClientName(victim, victimName, sizeof(victimName));
+	GetClientName(attacker, attackerName, sizeof(attackerName));
+
+	if(victim == attacker) return Plugin_Handled;
+
+	//Actions for attacker
+	if(IsClientConnected(attacker) && attacker != 0) {
+		int xpVal = Calculate_PlayerXP(attacker, victim);
+		int moneyVal = Calculate_PlayerMoney(attacker);
+		
+		int retVal = Process_XP(attacker, xpVal);
+		PlusMoney(attacker, moneyVal);
+		PlyKills[attacker]++;
+
+		PrintToClientEx(attacker, "You've killed {red}%s{default} and earned {green}%i{default} xp and {green}$%i{default}", victimName, retVal, moneyVal);
+		SavePlayer(attacker);
+	}
+
+	//Actions for victim
+	if(IsClientConnected(victim) && victim != 0) {
+		PlyDeaths[victim]++;
+		PrintToClientEx(victim, "You've been killed by {red}%s{default} who is level {green}%i{default}", attackerName, PlyLevel[attacker]);
+		SavePlayer(victim);
+	}
 	return Plugin_Handled;
 }
 
@@ -196,6 +235,10 @@ public Action Event_PlayerChat(int client, const char[] command, int argc) {
 }
 
 public Action Event_PlayerSpawn(Event event, const char[] name, bool dontBroadcast) {
+	int client = GetClientOfUserId(event.GetInt("userid", 0));
+	if(IsPlayerAlive(client)) {
+		CreateTimer(1.0, Timer_GiveWeapons, client);
+	}
 	return Plugin_Continue;
 }
 
@@ -252,7 +295,7 @@ public Action Timer_ProcessHud(Handle timer, any client) {
 		Engine_FormatNumber(PlyKills[client], newKills, sizeof(newKills));
 		Engine_FormatNumber(PlyDeaths[client], newDeaths, sizeof(newDeaths));
 		Engine_FormatNumber(PlyBounty[client], newBounty, sizeof(newBounty));
-		Format(hudText, sizeof(hudText), "Money: $%s\nKills: %s\nDeaths: %s\nLevel: %i\nXP: %i\100", 
+		Format(hudText, sizeof(hudText), "Money: $%s\nKills: %s\nDeaths: %s\nLevel: %i\nXP: %i/100", 
 			newMoney, 
 			newKills, 
 			newDeaths, 
@@ -275,8 +318,6 @@ public Action Timer_ProcessHud(Handle timer, any client) {
 public Action Timer_GiveWeapons(Handle timer, any client) {
 	GivePlayerItem(client, "weapon_357");
 	GivePlayerItem(client, "weapon_crossbow");
-	GivePlayerItem(client, "weapon_rpg");
-	GivePlayerItem(client, "weapon_ar2");
 	GivePlayerItem(client, "weapon_crowbar");
 	GivePlayerItem(client, "weapon_pistol");
 	GivePlayerItem(client, "weapon_smg1");
@@ -351,7 +392,7 @@ public Action Command_GetUptime(int client, int args) {
 //Returns a list of palyer commands
 public Action Command_GetCommands(int client, int args) {
 	PrintToClientEx(client, "See console {grey}(` button by default){default} for command list.");
-	for(int i = 0; i <= sizeof(CommandList); i++)  {
+	for(int i = 0; i < sizeof(CommandList); i++)  {
 		if(i == 0) PrintToConsole(client, "===COMMAND LIST===");
 		PrintToConsole(client, "%i. %s", i, CommandList[i]);
 	}
@@ -417,6 +458,52 @@ public Action Command_ChangePlayerModel(int client, int args) {
 	return Plugin_Handled;
 }
 
+//Change a players model
+public Action Command_Bet(int client, int args) {
+	if(args != 2) { PrintToClientEx(client, "Command takes 2 arguments (amount, red/black)"); return Plugin_Handled; }
+
+	char arg1[32], arg2[32];
+	GetCmdArg(1, arg1, sizeof(arg1));
+	GetCmdArg(2, arg2, sizeof(arg2));
+
+	int value = StringToInt(arg1, 10);
+	if(value < 20) { PrintToClientEx(client, "Minimum bet allowed: $20"); return Plugin_Handled; }
+	if(value > PlyMoney[client]) {
+		PrintToClientEx(client, "You don't have enough money for that.");
+		return Plugin_Handled;
+	}
+
+ 	//1 in 5 chance of winning
+	int chance = 0;
+	if(StrEqual(arg2, "black", false)) {
+		chance = GetRandomInt(1, 5);
+	}
+	else if(StrEqual(arg2, "red", false)) {
+		chance = GetRandomInt(1, 6);
+	}
+
+	if(chance == 5 || chance == 2) {
+		int winnings = value * 2;
+		char numWin[32];
+		Engine_FormatNumber(winnings, numWin, sizeof(numWin));
+
+		if(winnings >= 100000) {
+			char name[32];
+			GetClientName(client, name, sizeof(name));
+			PrintToAllClients("Congratulations to {green}%s{default} for winning {green}$%s{default} in gambling.", name, numWin);
+		}
+		PrintToClientEx(client, "Congratulations, you've won {green}$%s{default}", numWin);
+		PlusMoney(client, winnings);
+		SavePlayer(client);
+	}
+	else {
+		MinusMoney(client, value);
+		PrintToClientEx(client, "Sorry, you've lost {red}$%i{default}", value);
+		SavePlayer(client);
+	}
+	return Plugin_Handled;
+}
+
 
 
 
@@ -441,7 +528,13 @@ static void SQL_Initialise() {
 
 static Action SQL_CreatePlayerTable() {
 	char query[400];
-	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' ('ID' VARCHAR(50) NOT NULL PRIMARY KEY, Money INT(20) NOT NULL DEFAULT 0, Kills INT(6) NOT NULL DEFAULT 0, Deaths INT(6) NOT NULL DEFAULT 0, Level INT(3) NOT NULL DEFAULT 1, XP INT(2) NOT NULL DEFAULT 0, Bounty INT(20) NOT NULL DEFAULT 0)", Table_Player);
+
+	for(int i = 0; i < sizeof(Table_Columns)) {
+
+	}
+
+
+	Format(query, sizeof(query), "CREATE TABLE IF NOT EXISTS '%s' (%s)", Query_Create, Table_Player);
 	SQL_TQuery(DMDatabase, SQL_GenericTQueryCallback, query);
 	return Plugin_Handled;
 }
@@ -457,9 +550,8 @@ static void SQL_GenericTQueryCallback(Handle owner, Handle hndl, const char[] er
 static void LoadPlayer(int client) {
 	char query[200], playerAuth[32];
 	GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));
-	Format(query, sizeof(query), "SELECT * FROM `%s` WHERE `ID` = '%s'", Table_Player, playerAuth);
+	Format(query, sizeof(query), Query_LoadPly, Table_Player, playerAuth);
 	SQL_TQuery(DMDatabase, SQL_LoadCallback, query, client);
-	PrintToServer("%s Profile %s loaded.", PLUGIN_PREFIX, playerAuth);
 }
 
 //Load callback function
@@ -487,7 +579,7 @@ static void SQL_LoadCallback(Handle owner, Handle hndl, const char[] error, any 
 static void SQL_InsertNewPlayer(int client) {
 	char query[250], playerAuth[32];
 	GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));
-	Format(query, sizeof(query), "INSERT INTO %s ('ID') VALUES ('%s')", Table_Player, playerAuth);
+	Format(query, sizeof(query), Query_InsertPly, Table_Player, playerAuth);
 	SQL_TQuery(DMDatabase, SQL_InsertCallback, query, client);
 }
 
@@ -495,7 +587,7 @@ static void SQL_InsertNewPlayer(int client) {
 static void SQL_InsertCallback(Handle owner, Handle hndl, const char[] error, any data) {
 	if(hndl != null) {
 		LoadPlayer(data);
-		PrintToServer("%s Inserted new profile: %s", PLUGIN_PREFIX, data);
+		PrintToServer("%s Inserted new profile: %i", PLUGIN_PREFIX, data);
 	}
 	else {
 		Engine_Error("SQL_InsertCallback", "hndl was found to be null.");
@@ -506,14 +598,7 @@ static void SavePlayer(int client) {
 	char query[255], playerAuth[32];
 	if(IsClientInGame(client)) {
 		GetClientAuthId(client, AuthId_Steam3, playerAuth, sizeof(playerAuth));	
-		Format(query, sizeof(query), "UPDATE %s SET Money = '%i', Kills = '%i', Deaths = '%i', Level = '%i', XP = '%i', Bounty = '%i' WHERE ID = '%s'", 
-			Table_Player,
-			PlyKills[client],
-			PlyDeaths[client],
-			PlyLevel[client],
-			PlyXP[client],
-			PlyBounty[client],
-			playerAuth);
+		Format(query, sizeof(query), Query_SavePly, Table_Player, PlyMoney[client], PlyKills[client], PlyDeaths[client], PlyLevel[client], PlyXP[client], PlyBounty[client], playerAuth);
 		SQL_TQuery(DMDatabase, SQL_GenericTQueryCallback, query);
 	}
 }
@@ -526,7 +611,7 @@ static void PrintToClientEx(int client, const char[] arg, any ...) {
 	if(IsClientInGame(client)) {
 		char preBuffer[512], buffer[512]; //Maybe figure out a better solution than hardcoding size, maybe using sizeof
 		VFormat(preBuffer, sizeof(preBuffer), arg, 3);
-		Format(buffer, sizeof(buffer), "{crimson}Killbox-DM{default}| %s", preBuffer);
+		Format(buffer, sizeof(buffer), "{crimson}RPDM{default}| %s", preBuffer);
 		CPrintToChat(client, buffer);
 	}
 }
@@ -536,7 +621,7 @@ static void PrintToAllClients(const char[] arg, any ...) {
 
 	char preBuffer[512], buffer[512];
 	VFormat(preBuffer, sizeof(preBuffer), arg, 2);
-	Format(buffer, sizeof(buffer), "{crimson}Killbox-DM{default}| %s", preBuffer);
+	Format(buffer, sizeof(buffer), "{crimson}RPDM{default}| %s", preBuffer);
 	CPrintToChatAll(buffer);
 }
 
@@ -625,3 +710,56 @@ static void Engine_Error(char method[32], char content[255]) {
 	PrintToServer("%s - Error at (%s): %s.", PLUGIN_PREFIX, method, content);
 	LogError("%s - Error at (%s): %s.", PLUGIN_PREFIX, method, content);
 }
+
+//Simple calculation to work out how much xp they should get per kill
+static int Calculate_PlayerXP(int attacker, int victim) {
+	return PlyLevel[attacker] * PlyLevel[victim];
+}
+
+//Simple calculation to work out how much money they should get per kill
+static int Calculate_PlayerMoney(int client) {
+	int rnd = GetRandomInt(PlyLevel[client], PlyLevel[client]+10);
+	return 10 * rnd;
+}
+
+static int Process_XP(int client, int xp) {
+	int retVal = 0;
+	int valueToBe = PlyXP[client] + xp;
+	//Woo, level up
+	if(valueToBe >= 100) {
+		retVal = xp;
+		PlyLevel[client]++;
+		PlyXP[client] = 0;
+
+		int rewardAmount = PlyMoney[client] + PlyLevel[client] * 10;
+		PlyMoney[client] += rewardAmount;
+
+		char name[32];
+		GetClientName(client, name, sizeof(name));
+		PrintToAllClients("Congratulations to {green}%s{default} who has leveled up to {green}%i{default}", name, PlyLevel[client]);
+		PrintToClientEx(client, "{green}Congratulations!{default} You've leveled up to {green}%i{default} and have been rewarded with {green}$%i{default}", PlyLevel[client], rewardAmount);
+	}
+	else {
+		//Boost for level 1s
+		if(PlyLevel[client] == 1) {
+			int rnd = GetRandomInt(2, 10);
+			retVal = (xp + rnd);
+			PlyXP[client] += retVal;
+		}
+		else {
+			retVal = xp;
+			PlyXP[client] += retVal;
+		}
+	}
+	SavePlayer(client);
+	return retVal;
+}
+
+static int MinusMoney(int client, int amount) {
+	PlyMoney[client] -= amount;
+}
+
+static int PlusMoney(int client, int amount) {
+	PlyMoney[client] += amount;
+}
+
